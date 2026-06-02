@@ -348,6 +348,13 @@ def merge_and_resolve(spacy_entities: list[dict], gliner_entities: list[dict]) -
 
         all_docs = set(e.get("_source_doc", "") for e in group if e.get("_source_doc"))
         engines = set(e.get("_engine", "spacy") for e in group)
+        source_element_ids = _merge_scalar_values(group, "source_element_ids")
+        related_element_ids = _merge_scalar_values(group, "related_element_ids")
+        block_indices = _merge_scalar_values(group, "block_indices")
+        section_titles = _merge_scalar_values(group, "section_title")
+        related_refs = _related_refs(group)
+        related_figures = _related_refs(group, element_type="figure")
+        related_tables = _related_refs(group, element_type="table")
 
         contexts = [e.get("context", "") for e in group if e.get("context")]
         best_context = max(contexts, key=len) if contexts else ""
@@ -363,11 +370,71 @@ def merge_and_resolve(spacy_entities: list[dict], gliner_entities: list[dict]) -
             "context": best_context[:300],
             "aliases": sorted(set(e["text"] for e in group) - {best_text})[:5],
             "engines": sorted(engines),
+            "source_element_ids": source_element_ids,
+            "related_element_ids": related_element_ids,
+            "block_indices": block_indices,
+            "section_titles": section_titles,
+            "related_refs": related_refs,
+            "related_figures": related_figures,
+            "related_tables": related_tables,
         })
 
     resolved.sort(key=lambda e: -e["frequency"])
     log.info(f"Entity resolution: {len(all_entities)} → {len(resolved)} уникальных")
     return resolved
+
+
+def _merge_scalar_values(entities: list[dict], key: str) -> list:
+    """Собирает значения/list-значения из группы сущностей без дублей."""
+    result = []
+    seen = set()
+
+    for ent in entities:
+        value = ent.get(key, [])
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if item in ("", None):
+                continue
+            dedupe_key = json.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, dict) else item
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            result.append(item)
+
+    return result
+
+
+def _related_refs(entities: list[dict], element_type: str | None = None) -> list[str]:
+    """Человекочитаемые ссылки на связанные figure/table/caption элементы."""
+    refs = []
+    seen = set()
+
+    for ent in entities:
+        for element in ent.get("related_elements", []):
+            if not isinstance(element, dict):
+                continue
+            if element_type and element.get("element_type") != element_type:
+                continue
+
+            label = (
+                element.get("ref_label")
+                or element.get("caption")
+                or element.get("text_preview")
+                or element.get("element_id")
+            )
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            refs.append(label)
+
+    return refs
+
+
+def _split_attr(value: str) -> list[str]:
+    """Разбивает строковый атрибут графа обратно в список для JSON export."""
+    if not value:
+        return []
+    return [part.strip() for part in str(value).split(",") if part.strip()]
 
 
 def _should_merge(a: str, b: str) -> bool:
@@ -437,6 +504,15 @@ def build_clean_graph(resolved: list[dict], min_edge_weight: int = 2):
             aliases=",".join(ent["aliases"][:5]),
             context=ent["context"][:200],
             engines=",".join(ent.get("engines", [])),
+            source_element_ids=",".join(ent.get("source_element_ids", [])),
+            related_element_ids=",".join(ent.get("related_element_ids", [])),
+            block_indices=",".join(str(v) for v in ent.get("block_indices", [])),
+            sections=" | ".join(ent.get("section_titles", [])[:5]),
+            related_refs=" | ".join(ent.get("related_refs", [])[:8]),
+            related_figures=" | ".join(ent.get("related_figures", [])[:8]),
+            related_tables=" | ".join(ent.get("related_tables", [])[:8]),
+            source_element_count=len(ent.get("source_element_ids", [])),
+            related_element_count=len(ent.get("related_element_ids", [])),
         )
 
     # Co-occurrence
@@ -532,6 +608,12 @@ def generate_html(G, output_path: str, title: str = "Граф сущностей
             "comm": data.get("community", 0),
             "docs": data.get("source_docs", ""),
             "engines": data.get("engines", ""),
+            "sections": data.get("sections", ""),
+            "related_refs": data.get("related_refs", ""),
+            "related_figures": data.get("related_figures", ""),
+            "related_tables": data.get("related_tables", ""),
+            "source_element_count": data.get("source_element_count", 0),
+            "related_element_count": data.get("related_element_count", 0),
         })
 
     edges = []
@@ -655,7 +737,13 @@ function render(minW,minF){{
       +"Частота: "+d.freq+"<br>"
       +"Кластер: "+d.comm+"<br>"
       +"Документы: "+d.docs+"<br>"
-      +"Движки: "+(d.engines||"spacy")
+      +"Движки: "+(d.engines||"spacy")+"<br>"
+      +"Source elements: "+(d.source_element_count||0)+"<br>"
+      +"Related elements: "+(d.related_element_count||0)
+      +(d.sections?"<br><b>Секции:</b> "+d.sections:"")
+      +(d.related_figures?"<br><b>Графики:</b> "+d.related_figures:"")
+      +(d.related_tables?"<br><b>Таблицы:</b> "+d.related_tables:"")
+      +(d.related_refs && !d.related_figures?"<br><b>Связанные элементы:</b> "+d.related_refs:"")
     );
     d3.select(e.target).attr("stroke","#fff").attr("stroke-width",2);
   }}).on("mousemove",e=>{{
@@ -748,6 +836,14 @@ def export_all(G, resolved: list[dict], metrics: dict, output_dir: str):
             "id": n, "label": d.get("label", n), "type": d.get("entity_type", ""),
             "frequency": d.get("frequency", 1), "community": d.get("community", 0),
             "degree": G.degree(n), "source_docs": d.get("source_docs", ""),
+            "sections": d.get("sections", ""),
+            "related_refs": d.get("related_refs", ""),
+            "related_figures": d.get("related_figures", ""),
+            "related_tables": d.get("related_tables", ""),
+            "source_element_ids": _split_attr(d.get("source_element_ids", "")),
+            "related_element_ids": _split_attr(d.get("related_element_ids", "")),
+            "source_element_count": d.get("source_element_count", 0),
+            "related_element_count": d.get("related_element_count", 0),
         })
     for u, v, d in G.edges(data=True):
         gj["edges"].append({"source": u, "target": v, "weight": d.get("weight", 1)})

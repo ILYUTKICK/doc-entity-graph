@@ -41,10 +41,12 @@ import os
 import sys
 import json
 import time
+import re
 import hashlib
 import logging
 import shlex
 from pathlib import Path
+from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -54,6 +56,13 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("phase1")
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+CAPTION_RE = re.compile(
+    r"^\s*(?P<kind>рисунок|рис\.?|figure|fig\.?|таблица|табл\.?|table)"
+    r"\s*[\-–—№#]*\s*(?P<num>\d+(?:[.\-–]\d+)?|[ivxlcdm]+)?",
+    re.IGNORECASE,
+)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -70,6 +79,28 @@ class ParsedBlock:
     block_index: int         # Порядковый номер блока в reading order
     confidence: float = 1.0  # Уверенность распознавания
 
+
+@dataclass
+class DocumentElement:
+    """Структурный элемент документа для связей между текстом, графиками и таблицами."""
+    element_id: str
+    element_type: str        # "text", "title", "caption", "figure", "table", "formula", "list"
+    text: str = ""
+    page_number: int = 0
+    bbox: list[float] = field(default_factory=lambda: [0, 0, 0, 0])
+    block_index: int = 0
+    confidence: float = 1.0
+    source_type: str = ""
+    source_block_index: Optional[int] = None
+    ref_label: str = ""      # Например: "рис. 1", "table 2"
+    caption: str = ""
+    image_path: str = ""
+    table_html: str = ""
+    formula: str = ""
+    section_title: str = ""
+    metadata: dict = field(default_factory=dict)
+
+
 @dataclass
 class ParsedDocument:
     """Результат парсинга одного документа."""
@@ -77,6 +108,7 @@ class ParsedDocument:
     source_hash: str                        # MD5 для дедупликации
     total_pages: int
     blocks: list[ParsedBlock] = field(default_factory=list)
+    elements: list[DocumentElement] = field(default_factory=list)
     full_markdown: str = ""
     metadata: dict = field(default_factory=dict)
     parse_time_sec: float = 0.0
@@ -244,6 +276,7 @@ def load_mineru_output(output_dir: str, source_path: str) -> ParsedDocument:
           images/                — извлечённые изображения
     """
     output_path = Path(output_dir)
+    source_hash = _file_md5(source_path)
 
     # ── Поиск директории с результатами ──
     # MinerU кладёт в: <output>/<docname>/auto/
@@ -275,6 +308,7 @@ def load_mineru_output(output_dir: str, source_path: str) -> ParsedDocument:
 
     # ── Загрузка структурированных блоков ──
     blocks = []
+    elements = []
     json_files = (
         list(doc_dir.glob("*_content_list.json"))
         or list(doc_dir.glob("*_content_list_v2.json"))
@@ -289,50 +323,60 @@ def load_mineru_output(output_dir: str, source_path: str) -> ParsedDocument:
             raw_data = json.load(f)
 
         flat_items = _flatten_mineru_json(raw_data)
+        elements = _build_document_elements(flat_items, source_hash, doc_dir)
 
         for idx, item in enumerate(flat_items):
             text = _extract_block_text(item)
             if not text:
                 continue
 
+            block_type = _normalize_element_type(item, text)
+            if block_type == "figure":
+                continue
+
             block = ParsedBlock(
-                block_type=item.get("type", "text"),
+                block_type=block_type,
                 content=text,
-                page_number=item.get("page_idx", item.get("page_number", 0)),
-                bbox=item.get("bbox", [0, 0, 0, 0]),
+                page_number=_extract_page_number(item),
+                bbox=_extract_bbox(item),
                 block_index=idx,
                 confidence=item.get("score", item.get("confidence", 1.0)),
             )
             blocks.append(block)
 
         log.info(f"Загружено блоков: {len(blocks)}")
+        log.info(f"Структурных элементов: {len(elements)}")
     else:
         log.warning("JSON с блоками не найден")
 
     # ── Если блоков нет, но Markdown есть — парсим из Markdown ──
     if not blocks and full_markdown:
         blocks = _blocks_from_markdown(full_markdown)
+        elements = _elements_from_blocks(blocks, source_hash)
         log.info(f"Блоки восстановлены из Markdown: {len(blocks)}")
 
     # ── Сборка документа ──
-    source_hash = _file_md5(source_path)
-    page_numbers = {b.page_number for b in blocks}
+    page_numbers = {b.page_number for b in blocks} | {e.page_number for e in elements}
     total_pages = max(page_numbers) + 1 if page_numbers else 1
 
     img_dir = doc_dir / "images"
     img_count = len(list(img_dir.iterdir())) if img_dir.exists() else 0
+    element_type_counts = Counter(e.element_type for e in elements)
 
     return ParsedDocument(
         source_path=source_path,
         source_hash=source_hash,
         total_pages=total_pages,
         blocks=blocks,
+        elements=elements,
         full_markdown=full_markdown,
         metadata={
             "doc_name": Path(source_path).stem,
             "output_dir": str(doc_dir),
             "image_count": img_count,
             "json_source": str(json_files[0]) if json_files else None,
+            "element_count": len(elements),
+            "element_type_counts": dict(element_type_counts),
         },
     )
 
@@ -374,12 +418,16 @@ def _extract_block_text(item: dict) -> str:
 
     Форматы:
       - {"type": "text", "text": "..."} — простой текст
+      - {"type": "table", "table_body": "<table>...</table>"} — таблица
+      - {"type": "formula", "latex": "..."} — формула
       - {"type": "title", "content": {"title_content": [{"content": "..."}]}}
       - {"type": "paragraph", "content": {"paragraph_content": [{"content": "..."}]}}
     """
-    # Прямое поле text
-    if "text" in item and isinstance(item["text"], str):
-        return item["text"].strip()
+    # Прямые поля с содержимым
+    for key in ("text", "table_body", "table_html", "latex", "formula", "equation"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
 
     # Вложенная структура content
     content = item.get("content")
@@ -387,7 +435,7 @@ def _extract_block_text(item: dict) -> str:
         return content.strip()
 
     if isinstance(content, dict):
-        for key in ("title_content", "paragraph_content", "table_content"):
+        for key in ("title_content", "paragraph_content", "table_content", "formula_content"):
             parts = content.get(key, [])
             if parts:
                 texts = []
@@ -399,6 +447,305 @@ def _extract_block_text(item: dict) -> str:
                 return " ".join(t.strip() for t in texts if t).strip()
 
     return ""
+
+
+def _build_document_elements(
+    flat_items: list[dict],
+    source_hash: str,
+    doc_dir: Path,
+) -> list[DocumentElement]:
+    """Преобразование MinerU content_list в структурные элементы документа."""
+    elements = []
+    current_section = ""
+
+    for idx, item in enumerate(flat_items):
+        text = _extract_block_text(item)
+        element_type = _normalize_element_type(item, text)
+
+        if not text and element_type not in {"figure", "table", "formula"}:
+            continue
+
+        clean_text = _strip_markdown_wrappers(text)
+        caption = _extract_caption_from_item(item)
+        image_path = _extract_image_path(item, doc_dir) if element_type == "figure" else ""
+        table_html = _extract_table_html(item) if element_type == "table" else ""
+        formula = _extract_formula(item) if element_type == "formula" else ""
+
+        if element_type == "title":
+            current_section = clean_text
+
+        metadata = {}
+        if item.get("text_level"):
+            metadata["text_level"] = item["text_level"]
+        if caption and caption != clean_text:
+            metadata["raw_caption"] = caption
+
+        element = DocumentElement(
+            element_id=f"{source_hash[:8]}_el_{len(elements):04d}",
+            element_type=element_type,
+            text=clean_text,
+            page_number=_extract_page_number(item),
+            bbox=_extract_bbox(item),
+            block_index=idx,
+            confidence=item.get("score", item.get("confidence", 1.0)),
+            source_type=str(item.get("type", "")),
+            source_block_index=idx,
+            ref_label=_extract_ref_label(caption or clean_text),
+            caption=caption,
+            image_path=image_path,
+            table_html=table_html,
+            formula=formula,
+            section_title=clean_text if element_type == "title" else current_section,
+            metadata=metadata,
+        )
+        elements.append(element)
+
+    _link_caption_neighbors(elements)
+    return elements
+
+
+def _elements_from_blocks(
+    blocks: list[ParsedBlock],
+    source_hash: str,
+) -> list[DocumentElement]:
+    """Фолбэк-элементы из текстовых блоков, если MinerU JSON недоступен."""
+    elements = []
+    current_section = ""
+
+    for block in blocks:
+        item = {"type": block.block_type}
+        element_type = _normalize_element_type(item, block.content)
+        clean_text = _strip_markdown_wrappers(block.content)
+
+        if element_type == "title":
+            current_section = clean_text
+
+        elements.append(DocumentElement(
+            element_id=f"{source_hash[:8]}_el_{len(elements):04d}",
+            element_type=element_type,
+            text=clean_text,
+            page_number=block.page_number,
+            bbox=block.bbox,
+            block_index=block.block_index,
+            confidence=block.confidence,
+            source_type=block.block_type,
+            source_block_index=block.block_index,
+            ref_label=_extract_ref_label(clean_text),
+            section_title=clean_text if element_type == "title" else current_section,
+        ))
+
+    _link_caption_neighbors(elements)
+    return elements
+
+
+def _normalize_element_type(item: dict, text: str = "") -> str:
+    """Нормализация типов MinerU в типы, полезные для графа документа."""
+    raw_type = str(item.get("type", item.get("block_type", "text"))).lower()
+
+    if raw_type in {"image", "img", "figure"} or item.get("img_path") or item.get("image_path"):
+        return "figure"
+    if raw_type in {"table"} or item.get("table_body") or item.get("table_html"):
+        return "table"
+    if raw_type in {"formula", "equation", "inline_equation", "interline_equation"}:
+        return "formula"
+    if any(item.get(key) for key in ("latex", "formula", "equation")):
+        return "formula"
+    if raw_type in {"title", "heading", "header"} or item.get("text_level"):
+        return "title"
+    if raw_type in {"caption", "figure_caption", "table_caption"} or _is_caption_text(text):
+        return "caption"
+    if raw_type in {"list", "list_item"}:
+        return "list"
+    if raw_type in {"paragraph", "para"}:
+        return "text"
+
+    return raw_type or "text"
+
+
+def _extract_page_number(item: dict) -> int:
+    """Номер страницы из разных вариантов MinerU JSON."""
+    for key in ("page_idx", "page_number", "page"):
+        value = item.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def _extract_bbox(item: dict) -> list[float]:
+    """Координаты блока в формате [x0, y0, x1, y1]."""
+    bbox = item.get("bbox") or item.get("box") or item.get("position")
+    if isinstance(bbox, dict):
+        return [
+            bbox.get("x0", bbox.get("left", 0)),
+            bbox.get("y0", bbox.get("top", 0)),
+            bbox.get("x1", bbox.get("right", 0)),
+            bbox.get("y1", bbox.get("bottom", 0)),
+        ]
+    if isinstance(bbox, list) and len(bbox) >= 4:
+        return bbox[:4]
+    return [0, 0, 0, 0]
+
+
+def _strip_markdown_wrappers(text: str) -> str:
+    """Убирает лёгкую Markdown-обёртку, не трогая внутренний текст."""
+    stripped = (text or "").strip()
+    stripped = re.sub(r"^\s{0,3}#{1,6}\s*", "", stripped)
+
+    for marker in ("**", "__", "*", "_"):
+        if stripped.startswith(marker) and stripped.endswith(marker) and len(stripped) >= len(marker) * 2:
+            stripped = stripped[len(marker):-len(marker)].strip()
+            break
+
+    return stripped.strip()
+
+
+def _is_caption_text(text: str) -> bool:
+    """Эвристика: строка выглядит как подпись к рисунку или таблице."""
+    return bool(CAPTION_RE.match(_strip_markdown_wrappers(text)))
+
+
+def _extract_ref_label(text: str) -> str:
+    """Нормализованная ссылка из подписи: 'рис. 1', 'table 2', 'табл. 3'."""
+    match = CAPTION_RE.match(_strip_markdown_wrappers(text).lower())
+    if not match:
+        return ""
+
+    kind = match.group("kind").rstrip(".")
+    num = match.group("num") or ""
+
+    if kind in {"рис", "рисунок"}:
+        norm_kind = "рис."
+    elif kind in {"fig", "figure"}:
+        norm_kind = "figure"
+    elif kind in {"табл", "таблица"}:
+        norm_kind = "табл."
+    else:
+        norm_kind = "table"
+
+    return f"{norm_kind} {num}".strip()
+
+
+def _extract_caption_from_item(item: dict) -> str:
+    """Подпись, если MinerU сохранил её прямо внутри image/table блока."""
+    for key in ("caption", "image_caption", "table_caption"):
+        value = item.get(key)
+        caption = _value_to_text(value)
+        if caption:
+            return _strip_markdown_wrappers(caption)
+    return ""
+
+
+def _value_to_text(value) -> str:
+    """Рекурсивно собирает текст из строк, списков и словарей."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [_value_to_text(v) for v in value]
+        return " ".join(p for p in parts if p).strip()
+    if isinstance(value, dict):
+        direct = _extract_block_text(value)
+        if direct:
+            return direct
+        parts = [_value_to_text(v) for v in value.values()]
+        return " ".join(p for p in parts if p).strip()
+    return ""
+
+
+def _extract_image_path(item: dict, doc_dir: Path) -> str:
+    """Путь к извлечённому изображению, приведённый к пути относительно output dir."""
+    raw_path = None
+    for key in ("img_path", "image_path", "path", "src"):
+        value = item.get(key)
+        if _looks_like_image_path(value):
+            raw_path = value
+            break
+
+    if not raw_path:
+        raw_path = _find_image_path(item)
+
+    if not raw_path:
+        return ""
+
+    image_path = Path(raw_path)
+    if not image_path.is_absolute():
+        image_path = doc_dir / image_path
+    return str(image_path)
+
+
+def _find_image_path(value) -> Optional[str]:
+    """Поиск строки с расширением изображения внутри вложенной структуры."""
+    if _looks_like_image_path(value):
+        return value
+    if isinstance(value, dict):
+        for nested in value.values():
+            found = _find_image_path(nested)
+            if found:
+                return found
+    if isinstance(value, list):
+        for nested in value:
+            found = _find_image_path(nested)
+            if found:
+                return found
+    return None
+
+
+def _looks_like_image_path(value) -> bool:
+    return isinstance(value, str) and Path(value).suffix.lower() in IMAGE_EXTENSIONS
+
+
+def _extract_table_html(item: dict) -> str:
+    for key in ("table_body", "table_html", "html"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _extract_formula(item: dict) -> str:
+    for key in ("latex", "formula", "equation", "text"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _link_caption_neighbors(elements: list[DocumentElement]) -> None:
+    """Связывает подпись с ближайшим рисунком/таблицей на той же странице."""
+    structured_types = {"figure", "table"}
+
+    for caption in [e for e in elements if e.element_type == "caption"]:
+        label = caption.ref_label
+        if label.startswith(("рис.", "figure")):
+            target_types = {"figure"}
+        elif label.startswith(("табл.", "table")):
+            target_types = {"table"}
+        else:
+            target_types = structured_types
+
+        candidates = [
+            e for e in elements
+            if e.element_type in target_types
+            and e.page_number == caption.page_number
+            and abs(e.block_index - caption.block_index) <= 3
+        ]
+        if not candidates:
+            continue
+
+        target = min(
+            candidates,
+            key=lambda e: (abs(e.block_index - caption.block_index), e.block_index > caption.block_index),
+        )
+        caption.metadata["relation"] = "caption_of"
+        caption.metadata["linked_element_id"] = target.element_id
+        target.metadata.setdefault("caption_element_id", caption.element_id)
+
+        if not target.caption:
+            target.caption = caption.text
+        if caption.ref_label and not target.ref_label:
+            target.ref_label = caption.ref_label
 
 
 def _blocks_from_markdown(md_text: str) -> list[ParsedBlock]:
@@ -527,9 +874,8 @@ def clean_blocks(doc: ParsedDocument) -> ParsedDocument:
 
 def print_stats(doc: ParsedDocument):
     """Вывод статистики по распарсенному документу."""
-    from collections import Counter
-
     type_counts = Counter(b.block_type for b in doc.blocks)
+    element_counts = Counter(e.element_type for e in doc.elements)
     total_chars = sum(len(b.content) for b in doc.blocks)
 
     print(f"\n{'═' * 50}")
@@ -537,6 +883,7 @@ def print_stats(doc: ParsedDocument):
     print(f"{'═' * 50}")
     print(f"  Страниц:  {doc.total_pages}")
     print(f"  Блоков:   {len(doc.blocks)}")
+    print(f"  Элементов: {len(doc.elements)}")
     print(f"  Символов: {total_chars:,}")
     print(f"  Backend:  {doc.backend_used}")
     print(f"  Время:    {doc.parse_time_sec:.1f}с")
@@ -547,6 +894,13 @@ def print_stats(doc: ParsedDocument):
         pct = count / len(doc.blocks) * 100
         bar = "█" * int(pct / 5)
         print(f"    {btype:12s} │ {count:4d} │ {pct:5.1f}% {bar}")
+    if element_counts:
+        print(f"{'─' * 50}")
+        print("  Структурные элементы:")
+        for etype, count in element_counts.most_common():
+            pct = count / len(doc.elements) * 100
+            bar = "█" * int(pct / 5)
+            print(f"    {etype:12s} │ {count:4d} │ {pct:5.1f}% {bar}")
     print(f"{'═' * 50}\n")
 
 
@@ -589,6 +943,14 @@ def validate_parsing(doc: ParsedDocument) -> list[str]:
                 f"Таблица на стр. {tb.page_number} не содержит табличного формата"
             )
 
+    # Проверка структурного слоя для документов с извлечёнными изображениями
+    image_count = doc.metadata.get("image_count", 0)
+    figure_count = sum(1 for e in doc.elements if e.element_type == "figure")
+    if image_count and figure_count == 0:
+        warnings.append(
+            f"MinerU извлёк изображения ({image_count}), но figure-элементы не найдены"
+        )
+
     for w in warnings:
         log.warning(w)
 
@@ -613,6 +975,7 @@ def save_for_next_phase(doc: ParsedDocument, output_path: str):
         "parse_time_sec": doc.parse_time_sec,
         "metadata": doc.metadata,
         "blocks": [asdict(b) for b in doc.blocks],
+        "elements": [asdict(e) for e in doc.elements],
         "full_markdown": doc.full_markdown,
     }
 
@@ -673,7 +1036,12 @@ def batch_parse(
                 source_path=data["source"],
                 source_hash=data["source_hash"],
                 total_pages=data["total_pages"],
+                blocks=[ParsedBlock(**b) for b in data.get("blocks", [])],
+                elements=[DocumentElement(**e) for e in data.get("elements", [])],
                 full_markdown=data.get("full_markdown", ""),
+                metadata=data.get("metadata", {}),
+                parse_time_sec=data.get("parse_time_sec", 0.0),
+                backend_used=data.get("backend", "pipeline"),
             )
             results.append(doc)
             continue

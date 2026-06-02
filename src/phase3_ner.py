@@ -57,6 +57,16 @@ class Entity:
     context: str = ""                # Предложение-контекст (для RE)
     start_char: int = 0              # Позиция в чанке
     end_char: int = 0
+    page_start: int = 0              # Страница начала чанка
+    page_end: int = 0                # Страница конца чанка
+    section_title: str = ""          # Секция чанка
+    section_hierarchy: list = field(default_factory=list)
+    block_indices: list = field(default_factory=list)
+    source_blocks: list = field(default_factory=list)
+    source_element_ids: list = field(default_factory=list)
+    related_element_ids: list = field(default_factory=list)
+    source_elements: list = field(default_factory=list)
+    related_elements: list = field(default_factory=list)
 
 
 @dataclass
@@ -445,6 +455,80 @@ def _extract_context(full_text: str, entity_text: str, window: int = 150) -> str
     return context
 
 
+def attach_chunk_provenance(entities: list[Entity], chunk: dict) -> list[Entity]:
+    """Наследует provenance чанка для каждой извлечённой сущности."""
+    for ent in entities:
+        ent.page_start = chunk.get("page_start", 0)
+        ent.page_end = chunk.get("page_end", ent.page_start)
+        ent.section_title = chunk.get("section_title", "")
+        ent.section_hierarchy = list(chunk.get("section_hierarchy", []))
+        ent.block_indices = list(chunk.get("block_indices", []))
+        ent.source_blocks = list(chunk.get("source_blocks", []))
+        ent.source_element_ids = list(chunk.get("source_element_ids", []))
+        ent.related_element_ids = list(chunk.get("related_element_ids", []))
+        ent.source_elements = list(chunk.get("source_elements", []))
+        ent.related_elements = list(chunk.get("related_elements", []))
+
+    return entities
+
+
+def _unique_keep_order(values: list) -> list:
+    """Дедупликация списка без потери порядка."""
+    seen = set()
+    result = []
+
+    for value in values:
+        if value is None:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+
+    return result
+
+
+def _merge_scalar_lists(groups: list[Entity], attr: str) -> list:
+    """Объединение list[str/int] полей у сущностей."""
+    values = []
+    for ent in groups:
+        value = getattr(ent, attr, [])
+        if isinstance(value, list):
+            values.extend(value)
+        elif value:
+            values.append(value)
+    return _unique_keep_order(values)
+
+
+def _merge_summary_lists(groups: list[Entity], attr: str) -> list[dict]:
+    """Объединение списков словарей с кратким provenance-описанием."""
+    result = []
+    seen = set()
+
+    for ent in groups:
+        for item in getattr(ent, attr, []):
+            if not isinstance(item, dict):
+                continue
+
+            key = (
+                item.get("element_id"),
+                item.get("block_index"),
+                item.get("element_type"),
+                item.get("block_type"),
+                item.get("text_preview"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+
+    return result
+
+
+def _split_chunk_ids(chunk_id: str) -> list[str]:
+    return [cid.strip() for cid in chunk_id.split(",") if cid.strip()]
+
+
 # ══════════════════════════════════════════════════════════════
 # ЧАСТЬ 7: ПОСТОБРАБОТКА И ДЕДУПЛИКАЦИЯ
 # ══════════════════════════════════════════════════════════════
@@ -468,8 +552,14 @@ def deduplicate_entities(entities: list[Entity]) -> list[Entity]:
         # Берём сущность с макс. confidence
         best = max(group, key=lambda e: e.confidence)
 
-        # Собираем все chunk_id
-        all_chunks = list(set(e.chunk_id for e in group))
+        # Собираем все chunk_id и provenance
+        all_chunks = _unique_keep_order([
+            cid
+            for ent in group
+            for cid in _split_chunk_ids(ent.chunk_id)
+        ])
+        page_starts = [ent.page_start for ent in group]
+        page_ends = [ent.page_end for ent in group]
 
         deduped.append(Entity(
             text=best.text,
@@ -481,6 +571,16 @@ def deduplicate_entities(entities: list[Entity]) -> list[Entity]:
             context=best.context,
             start_char=best.start_char,
             end_char=best.end_char,
+            page_start=min(page_starts) if page_starts else best.page_start,
+            page_end=max(page_ends) if page_ends else best.page_end,
+            section_title=best.section_title,
+            section_hierarchy=best.section_hierarchy,
+            block_indices=_merge_scalar_lists(group, "block_indices"),
+            source_blocks=_merge_summary_lists(group, "source_blocks"),
+            source_element_ids=_merge_scalar_lists(group, "source_element_ids"),
+            related_element_ids=_merge_scalar_lists(group, "related_element_ids"),
+            source_elements=_merge_summary_lists(group, "source_elements"),
+            related_elements=_merge_summary_lists(group, "related_elements"),
         ))
 
     return sorted(deduped, key=lambda e: (-e.confidence, e.entity_type, e.normalized))
@@ -580,6 +680,7 @@ def extract_entities(
 
         try:
             chunk_entities = engine.extract(text, chunk_id, source_doc)
+            attach_chunk_provenance(chunk_entities, chunk)
             all_entities.extend(chunk_entities)
         except Exception as e:
             log.warning(f"  Ошибка NER в чанке {chunk_id}: {e}")
@@ -612,6 +713,10 @@ def extract_entities(
             "unique_count": len(unique_entities),
             "chunks_processed": len(chunks),
             "avg_per_chunk": len(all_entities) / max(len(chunks), 1),
+            "raw_with_source_elements": sum(1 for e in all_entities if e.source_element_ids),
+            "raw_with_related_elements": sum(1 for e in all_entities if e.related_element_ids),
+            "unique_with_source_elements": sum(1 for e in unique_entities if e.source_element_ids),
+            "unique_with_related_elements": sum(1 for e in unique_entities if e.related_element_ids),
         },
     )
 
@@ -628,6 +733,8 @@ def print_stats(doc: DocumentEntities):
     print(f"  Движок:         {doc.engine}")
     print(f"  Raw сущностей:  {doc.total_entities}")
     print(f"  Уникальных:     {doc.unique_entities}")
+    print(f"  С source elem:  {doc.stats.get('unique_with_source_elements', 0)}")
+    print(f"  С related elem: {doc.stats.get('unique_with_related_elements', 0)}")
     print(f"{'─' * 55}")
     print("  Типы сущностей:")
     for etype, count in sorted(doc.entity_counts.items(), key=lambda x: -x[1]):

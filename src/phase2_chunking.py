@@ -31,6 +31,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("phase2")
 
+STRUCTURED_ELEMENT_TYPES = {"figure", "caption", "table", "formula"}
+RELATED_BLOCK_WINDOW = 1
+
 
 # ══════════════════════════════════════════════════════════════
 # ЧАСТЬ 1: СТРУКТУРЫ ДАННЫХ
@@ -53,6 +56,11 @@ class Chunk:
     has_tables: bool = False         # Есть ли таблицы
     overlap_prev: bool = False       # Перекрывается с предыдущим чанком
     overlap_next: bool = False       # Перекрывается со следующим чанком
+    source_blocks: list = field(default_factory=list)      # Краткое описание исходных блоков
+    source_element_ids: list = field(default_factory=list)  # ID элементов Phase 1, попавших в чанк
+    source_elements: list = field(default_factory=list)     # Краткое описание этих элементов
+    related_element_ids: list = field(default_factory=list) # Близкие figure/table/caption/formula
+    related_elements: list = field(default_factory=list)    # Краткое описание связанных элементов
 
 
 @dataclass
@@ -139,7 +147,46 @@ def get_title_level(block: dict) -> int:
 
 def clean_title(text: str) -> str:
     """Очистка текста заголовка от Markdown-разметки."""
-    return text.strip().lstrip("#").strip()
+    cleaned = text.strip().lstrip("#").strip()
+    for marker in ("**", "__", "*", "_"):
+        if cleaned.startswith(marker) and cleaned.endswith(marker):
+            cleaned = cleaned[len(marker):-len(marker)].strip()
+            break
+    return cleaned
+
+
+def _merge_element_metadata_into_blocks(blocks: list[dict], elements: list[dict]) -> None:
+    """Возвращает в blocks полезные layout-поля, которые Phase 1 хранит в elements."""
+    text_level_by_block = {}
+
+    for element in elements:
+        if element.get("element_type") != "title":
+            continue
+        metadata = element.get("metadata", {})
+        text_level = metadata.get("text_level")
+        source_idx = element.get("source_block_index", element.get("block_index"))
+        if text_level and source_idx is not None:
+            try:
+                text_level_by_block[int(source_idx)] = text_level
+            except (TypeError, ValueError):
+                continue
+
+    for i, block in enumerate(blocks):
+        block_idx = int(block.get("block_index", i))
+        if block_idx in text_level_by_block and "text_level" not in block:
+            block["text_level"] = text_level_by_block[block_idx]
+
+
+def _unique_keep_order(values: list) -> list:
+    """Дедупликация списка без потери порядка."""
+    seen = set()
+    result = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
@@ -218,8 +265,10 @@ def _group_into_sections(blocks: list[dict]) -> list[dict]:
     sections = []
     current_section = {
         "title": "",
+        "title_block_index": None,
         "hierarchy": [],
         "blocks": [],
+        "block_records": [],
         "pages": set(),
         "has_equations": False,
         "has_tables": False,
@@ -254,8 +303,10 @@ def _group_into_sections(blocks: list[dict]) -> list[dict]:
 
             current_section = {
                 "title": title_text,
+                "title_block_index": b_idx,
                 "hierarchy": [h[1] for h in hierarchy_stack],
                 "blocks": [],
+                "block_records": [],
                 "pages": {page},
                 "has_equations": False,
                 "has_tables": False,
@@ -264,10 +315,17 @@ def _group_into_sections(blocks: list[dict]) -> list[dict]:
         else:
             # ─── Обычный блок → добавляем в текущую секцию ───
             current_section["blocks"].append(text)
+            current_section["block_records"].append({
+                "text": text,
+                "block_index": b_idx,
+                "page": page,
+                "block_type": btype,
+                "bbox": block.get("bbox", [0, 0, 0, 0]),
+            })
             current_section["pages"].add(page)
             current_section["block_indices"].append(b_idx)
 
-            if btype == "equation":
+            if btype in {"equation", "formula"}:
                 current_section["has_equations"] = True
             if btype == "table":
                 current_section["has_tables"] = True
@@ -288,77 +346,132 @@ def _section_to_chunks(
     Преобразование секции в один или несколько чанков.
     Если секция слишком большая — разбиваем по предложениям.
     """
-    full_text = "\n".join(section["blocks"])
+    block_records = section.get("block_records") or []
+    full_text = "\n".join(r["text"] for r in block_records) if block_records else "\n".join(section["blocks"])
     tokens = estimate_tokens(full_text)
     pages = sorted(section["pages"]) if section["pages"] else [0]
 
-    base = {
-        "section_title": section["title"],
-        "hierarchy": section["hierarchy"],
-        "has_equations": section["has_equations"],
-        "has_tables": section["has_tables"],
-        "block_indices": section["block_indices"],
-    }
-
     # Секция помещается в один чанк
     if tokens <= max_tokens:
-        # Добавляем заголовок секции в текст для контекста NER
-        text = full_text
-        if section["title"]:
-            text = f"{section['title']}\n\n{full_text}"
-
-        return [{
-            **base,
-            "text": text.strip(),
-            "page_start": pages[0],
-            "page_end": pages[-1],
-        }]
+        return [_make_section_chunk(
+            section=section,
+            body_text=full_text,
+            pages=pages,
+            block_indices=_section_source_indices(section),
+            has_equations=section["has_equations"],
+            has_tables=section["has_tables"],
+        )]
 
     # Секция слишком большая — разбиваем по предложениям
-    sentences = _split_sentences(full_text)
+    units = _section_sentence_units(section)
     chunks = []
-    current_sents = []
+    current_units = []
     current_tokens = 0
 
-    for sent in sentences:
-        sent_tokens = estimate_tokens(sent)
+    for unit in units:
+        sent_tokens = estimate_tokens(unit["text"])
 
-        if current_tokens + sent_tokens > max_tokens and current_sents:
+        if current_tokens + sent_tokens > max_tokens and current_units:
             # Сохраняем текущий чанк
-            text = " ".join(current_sents)
-            if section["title"]:
-                text = f"{section['title']}\n\n{text}"
-
-            chunks.append({
-                **base,
-                "text": text.strip(),
-                "page_start": pages[0],
-                "page_end": pages[-1],
-            })
-            current_sents = []
+            chunks.append(_chunk_from_units(section, current_units))
+            current_units = []
             current_tokens = 0
 
-        current_sents.append(sent)
+        current_units.append(unit)
         current_tokens += sent_tokens
 
     # Остаток
-    if current_sents:
-        text = " ".join(current_sents)
-        if section["title"]:
-            text = f"{section['title']}\n\n{text}"
+    if current_units:
+        tail_chunk = _chunk_from_units(section, current_units)
 
         # Если остаток слишком маленький — склеиваем с последним
         if current_tokens < min_tokens and chunks:
-            chunks[-1]["text"] += "\n" + text.strip()
+            _merge_raw_chunks(chunks[-1], tail_chunk)
         else:
-            chunks.append({
-                **base,
-                "text": text.strip(),
-                "page_start": pages[0],
-                "page_end": pages[-1],
-            })
+            chunks.append(tail_chunk)
 
     return chunks
+
+
+def _section_source_indices(section: dict, block_indices: list | None = None) -> list:
+    """Индексы блоков секции с учётом заголовка, если он добавлен в текст чанка."""
+    indices = []
+    title_idx = section.get("title_block_index")
+    if title_idx is not None:
+        indices.append(title_idx)
+    indices.extend(block_indices if block_indices is not None else section.get("block_indices", []))
+    return _unique_keep_order(indices)
+
+
+def _make_section_chunk(
+    section: dict,
+    body_text: str,
+    pages: list[int],
+    block_indices: list,
+    has_equations: bool,
+    has_tables: bool,
+) -> dict:
+    """Создаёт сырой чанк с секционным контекстом и провенансом блоков."""
+    text = body_text
+    if section["title"]:
+        text = f"{section['title']}\n\n{body_text}"
+
+    return {
+        "section_title": section["title"],
+        "hierarchy": section["hierarchy"],
+        "has_equations": has_equations,
+        "has_tables": has_tables,
+        "block_indices": _section_source_indices(section, block_indices),
+        "text": text.strip(),
+        "page_start": pages[0],
+        "page_end": pages[-1],
+    }
+
+
+def _section_sentence_units(section: dict) -> list[dict]:
+    """Разбивает блоки секции на sentence-units с сохранением source block."""
+    units = []
+
+    for record in section.get("block_records", []):
+        sentences = _split_sentences(record["text"]) or [record["text"]]
+        for sentence in sentences:
+            units.append({
+                "text": sentence,
+                "block_index": record["block_index"],
+                "page": record["page"],
+                "block_type": record["block_type"],
+            })
+
+    return units
+
+
+def _chunk_from_units(section: dict, units: list[dict]) -> dict:
+    """Собирает сырой чанк из sentence-units."""
+    pages = sorted({u["page"] for u in units}) or [0]
+    block_indices = _unique_keep_order([u["block_index"] for u in units])
+    block_types = {u["block_type"] for u in units}
+    body_text = " ".join(u["text"] for u in units)
+
+    return _make_section_chunk(
+        section=section,
+        body_text=body_text,
+        pages=pages,
+        block_indices=block_indices,
+        has_equations=bool(block_types & {"equation", "formula"}),
+        has_tables="table" in block_types,
+    )
+
+
+def _merge_raw_chunks(target: dict, tail: dict) -> None:
+    """Склеивает маленький хвост с предыдущим чанком и объединяет source-поля."""
+    target["text"] += "\n" + tail["text"].strip()
+    target["block_indices"] = _unique_keep_order(
+        target.get("block_indices", []) + tail.get("block_indices", [])
+    )
+    target["page_start"] = min(target.get("page_start", 0), tail.get("page_start", 0))
+    target["page_end"] = max(target.get("page_end", 0), tail.get("page_end", 0))
+    target["has_equations"] = target.get("has_equations", False) or tail.get("has_equations", False)
+    target["has_tables"] = target.get("has_tables", False) or tail.get("has_tables", False)
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -476,6 +589,209 @@ def chunk_sliding_window(
     return chunks
 
 
+def _attach_source_context(
+    chunks: list[Chunk],
+    blocks: list[dict],
+    elements: list[dict],
+) -> None:
+    """Обогащает чанки ссылками на блоки и структурные элементы Phase 1."""
+    block_by_idx = {
+        int(block.get("block_index", i)): block
+        for i, block in enumerate(blocks)
+    }
+    elements_by_block = {}
+    element_by_id = {}
+
+    for element in elements:
+        element_id = element.get("element_id")
+        if element_id:
+            element_by_id[element_id] = element
+
+        source_idx = _element_source_block_index(element)
+        if source_idx is not None:
+            elements_by_block.setdefault(source_idx, []).append(element)
+
+    for chunk in chunks:
+        if not chunk.block_indices:
+            chunk.block_indices = _infer_block_indices_from_text(chunk.text, blocks)
+
+        chunk.block_indices = _unique_keep_order(chunk.block_indices)
+        chunk.source_blocks = [
+            _summarize_block(block_by_idx[idx])
+            for idx in chunk.block_indices
+            if idx in block_by_idx
+        ]
+
+        source_elements = []
+        for idx in chunk.block_indices:
+            source_elements.extend(elements_by_block.get(idx, []))
+        source_elements = _dedupe_elements(source_elements)
+
+        related_elements = _related_elements_for_chunk(
+            chunk=chunk,
+            source_elements=source_elements,
+            all_elements=elements,
+            element_by_id=element_by_id,
+        )
+
+        chunk.source_element_ids = [
+            e["element_id"] for e in source_elements if e.get("element_id")
+        ]
+        chunk.source_elements = [_summarize_element(e) for e in source_elements]
+        chunk.related_element_ids = [
+            e["element_id"] for e in related_elements if e.get("element_id")
+        ]
+        chunk.related_elements = [_summarize_element(e) for e in related_elements]
+
+
+def _element_source_block_index(element: dict) -> Optional[int]:
+    """Индекс исходного блока элемента Phase 1."""
+    value = element.get("source_block_index", element.get("block_index"))
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _infer_block_indices_from_text(text: str, blocks: list[dict]) -> list[int]:
+    """Фолбэк для стратегий, где block_indices не были рассчитаны явно."""
+    indices = []
+    for i, block in enumerate(blocks):
+        block_text = block.get("content", block.get("text", "")).strip()
+        if not block_text:
+            continue
+
+        block_idx = int(block.get("block_index", i))
+        probe = block_text if len(block_text) <= 160 else block_text[:160]
+        if block_text in text or probe in text:
+            indices.append(block_idx)
+
+    return _unique_keep_order(indices)
+
+
+def _summarize_block(block: dict) -> dict:
+    """Краткое описание исходного блока без дублирования полного текста."""
+    text = block.get("content", block.get("text", "")).strip()
+    return {
+        "block_index": block.get("block_index", 0),
+        "block_type": block.get("block_type", block.get("type", "text")),
+        "page_number": block.get("page_number", block.get("page_idx", 0)),
+        "bbox": block.get("bbox", [0, 0, 0, 0]),
+        "text_preview": text[:180],
+    }
+
+
+def _summarize_element(element: dict) -> dict:
+    """Краткое описание элемента Phase 1 для сохранения в chunked JSON."""
+    text = element.get("text", "").strip()
+    summary = {
+        "element_id": element.get("element_id", ""),
+        "element_type": element.get("element_type", ""),
+        "page_number": element.get("page_number", 0),
+        "block_index": element.get("block_index", 0),
+        "source_block_index": element.get("source_block_index"),
+        "bbox": element.get("bbox", [0, 0, 0, 0]),
+        "ref_label": element.get("ref_label", ""),
+        "section_title": element.get("section_title", ""),
+        "text_preview": text[:180],
+    }
+
+    for key in ("caption", "image_path", "formula"):
+        value = element.get(key)
+        if value:
+            summary[key] = value
+
+    table_html = element.get("table_html")
+    if table_html:
+        summary["table_html_preview"] = table_html[:240]
+
+    metadata = element.get("metadata", {})
+    if metadata.get("relation"):
+        summary["relation"] = metadata["relation"]
+    if metadata.get("linked_element_id"):
+        summary["linked_element_id"] = metadata["linked_element_id"]
+    if metadata.get("caption_element_id"):
+        summary["caption_element_id"] = metadata["caption_element_id"]
+
+    return summary
+
+
+def _dedupe_elements(elements: list[dict]) -> list[dict]:
+    """Дедупликация элементов по element_id с сохранением порядка."""
+    result = []
+    seen = set()
+
+    for element in elements:
+        element_id = element.get("element_id")
+        key = element_id or (element.get("element_type"), element.get("block_index"), element.get("text", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(element)
+
+    return result
+
+
+def _related_elements_for_chunk(
+    chunk: Chunk,
+    source_elements: list[dict],
+    all_elements: list[dict],
+    element_by_id: dict,
+) -> list[dict]:
+    """Находит структурные элементы, полезные для контекста чанка."""
+    related = []
+    source_ids = {e.get("element_id") for e in source_elements}
+
+    for element in source_elements:
+        if element.get("element_type") in STRUCTURED_ELEMENT_TYPES:
+            related.append(element)
+        linked_id = element.get("metadata", {}).get("linked_element_id")
+        if linked_id and linked_id in element_by_id:
+            related.append(element_by_id[linked_id])
+        caption_id = element.get("metadata", {}).get("caption_element_id")
+        if caption_id and caption_id in element_by_id:
+            related.append(element_by_id[caption_id])
+
+    page_start = chunk.page_start
+    page_end = chunk.page_end
+    block_indices = chunk.block_indices
+    min_block = min(block_indices) if block_indices else None
+    max_block = max(block_indices) if block_indices else None
+
+    for element in all_elements:
+        element_type = element.get("element_type")
+        if element_type not in STRUCTURED_ELEMENT_TYPES:
+            continue
+
+        same_page = page_start <= element.get("page_number", 0) <= page_end
+        section_candidates = set(chunk.section_hierarchy + ([chunk.section_title] if chunk.section_title else []))
+        same_section = bool(element.get("section_title") in section_candidates)
+
+        element_block = _element_source_block_index(element)
+        near_block = (
+            element_block is not None
+            and min_block is not None
+            and min_block - RELATED_BLOCK_WINDOW <= element_block <= max_block + RELATED_BLOCK_WINDOW
+        )
+
+        if same_page and (same_section or near_block):
+            related.append(element)
+            linked_id = element.get("metadata", {}).get("linked_element_id")
+            if linked_id and linked_id in element_by_id:
+                related.append(element_by_id[linked_id])
+            caption_id = element.get("metadata", {}).get("caption_element_id")
+            if caption_id and caption_id in element_by_id:
+                related.append(element_by_id[caption_id])
+
+        linked_id = element.get("metadata", {}).get("linked_element_id")
+        if linked_id in source_ids:
+            related.append(element)
+
+    return _dedupe_elements(related)
+
+
 # ══════════════════════════════════════════════════════════════
 # ЧАСТЬ 6: ОСНОВНОЙ ПАЙПЛАЙН
 # ══════════════════════════════════════════════════════════════
@@ -500,6 +816,8 @@ def chunk_document(
     # Загрузка данных из Фазы 1
     data = load_parsed_document(parsed_json_path)
     blocks = data["blocks"]
+    elements = data.get("elements", [])
+    _merge_element_metadata_into_blocks(blocks, elements)
     source_doc = data["source"]
     source_hash = data["source_hash"]
 
@@ -529,6 +847,7 @@ def chunk_document(
 
     # Фильтрация пустых чанков
     chunks = [c for c in chunks if c.text.strip() and c.token_count >= 10]
+    _attach_source_context(chunks, blocks, elements)
 
     # Статистика
     token_counts = [c.token_count for c in chunks]
@@ -541,6 +860,8 @@ def chunk_document(
         "chunks_with_equations": sum(1 for c in chunks if c.has_equations),
         "chunks_with_tables": sum(1 for c in chunks if c.has_tables),
         "chunks_with_overlap": sum(1 for c in chunks if c.overlap_prev or c.overlap_next),
+        "chunks_with_source_elements": sum(1 for c in chunks if c.source_element_ids),
+        "chunks_with_related_elements": sum(1 for c in chunks if c.related_element_ids),
     }
 
     return ChunkedDocument(
@@ -570,7 +891,10 @@ def print_stats(doc: ChunkedDocument):
     print(f"  Среднее:        {s['avg_tokens']:.0f} токенов/чанк")
     print(f"  Мин/Макс:       {s['min_tokens']} / {s['max_tokens']}")
     print(f"  С формулами:    {s['chunks_with_equations']}")
+    print(f"  С таблицами:    {s['chunks_with_tables']}")
     print(f"  С перекрытием:  {s['chunks_with_overlap']}")
+    print(f"  С source elem:  {s.get('chunks_with_source_elements', 0)}")
+    print(f"  С related elem: {s.get('chunks_with_related_elements', 0)}")
     print(f"{'─' * 55}")
 
     # Распределение размеров
@@ -617,6 +941,12 @@ def preview_chunks(doc: ChunkedDocument, n: int = 3):
         overlap = " (overlap)" if chunk.overlap_prev else ""
         print(f"\n  ┌─ Чанк {chunk.chunk_id}{section}{overlap}")
         print(f"  │  Стр. {chunk.page_start}-{chunk.page_end} │ ~{chunk.token_count} токенов")
+        if chunk.related_elements:
+            related = ", ".join(
+                e.get("ref_label") or e.get("element_type", "")
+                for e in chunk.related_elements[:3]
+            )
+            print(f"  │  Связанные элементы: {related}")
         print(f"  │")
         # Первые 200 символов текста
         preview = chunk.text[:200].replace("\n", "\n  │  ")

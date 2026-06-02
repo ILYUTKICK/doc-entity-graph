@@ -131,12 +131,26 @@ echo "═══ Фаза 4: Очистка + GLiNER + граф ═══"
 require_files "outputs" "entity_graph_clean.html" "Фаза 4"
 echo ""
 
+# Фаза 5: Linking-граф документа
+echo "═══ Фаза 5: Linking-граф документа ═══"
+"$PYTHON_BIN" src/phase5_linking.py \
+    -e data/entities/ \
+    -c data/chunked/ \
+    -p data/parsed/ \
+    -o outputs/
+require_files "outputs" "document_links.html" "Фаза 5"
+echo ""
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  🎉 ГОТОВО!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "  Граф:     outputs/entity_graph_clean.html"
-echo "  GraphML:  outputs/entity_graph_clean.graphml"
-echo "  JSON:     outputs/entity_graph_clean.json"
+echo "  Граф сущностей:       outputs/entity_graph_clean.html"
+echo "  Linking-граф:         outputs/document_links.html"
+echo "  Entity GraphML:       outputs/entity_graph_clean.graphml"
+echo "  Linking GraphML:      outputs/document_links.graphml"
+echo "  Entity JSON:          outputs/entity_graph_clean.json"
+echo "  Linking JSON:         outputs/document_links.json"
 echo ""
-echo "  Открыть:  open outputs/entity_graph_clean.html"
+echo "  Открыть entity graph:  open outputs/entity_graph_clean.html"
+echo "  Открыть linking graph: open outputs/document_links.html"
