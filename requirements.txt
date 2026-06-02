@@ -1,0 +1,17 @@
+# Core reproducible environment for the baseline pipeline.
+# Python: 3.11 is recommended.
+
+# Document parsing
+mineru[all]>=2.0
+
+# Named entity recognition
+spacy>=3.7,<4.0
+gliner>=0.2.0,<1.0
+
+# Graph construction and metrics
+networkx>=3.0,<4.0
+
+# Utilities
+numpy>=1.24,<3.0
+requests>=2.31,<3.0
+tqdm>=4.66,<5.0

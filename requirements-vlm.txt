@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Optional direct VLM path used by parse_via_vlm_direct().
+transformers>=4.40
+pillow>=10.0
+mineru-vl-utils[transformers]

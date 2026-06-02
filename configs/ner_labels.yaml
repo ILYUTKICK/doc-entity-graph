@@ -1,0 +1,29 @@
+# Zero-shot labels for GLiNER.
+#
+# Keep labels in English because GLiNER models are usually prompted most
+# consistently with English type descriptions.
+
+finance_labels:
+  - person
+  - organization
+  - financial model
+  - financial instrument
+  - economic theory
+  - formula name
+  - academic publication
+  - university
+  - stock exchange
+  - country
+
+type_map:
+  person: PERSON
+  organization: ORG
+  financial model: CONCEPT
+  financial instrument: INSTRUMENT
+  economic theory: CONCEPT
+  formula name: FORMULA
+  academic publication: WORK
+  university: ORG
+  stock exchange: ORG
+  country: LOCATION
+

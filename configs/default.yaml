@@ -1,0 +1,31 @@
+# Default pipeline parameters.
+#
+# The scripts currently expose these values as CLI arguments. This file keeps
+# the experiment settings in one place for reports and future automation.
+
+paths:
+  raw_dir: data/raw
+  parsed_dir: data/parsed
+  chunked_dir: data/chunked
+  entities_dir: data/entities
+  graph_dir: data/graph
+  outputs_dir: outputs
+
+mineru:
+  backend: pipeline
+
+chunking:
+  strategy: sections
+  max_tokens: 512
+  min_tokens: 50
+  overlap_sentences: 2
+
+ner:
+  engine: spacy
+  spacy_ru_model: ru_core_news_lg
+  spacy_en_model: en_core_web_sm
+  gliner_model: urchade/gliner_multi-v2.1
+
+graph:
+  min_edge_weight: 1
+  remove_isolates: true

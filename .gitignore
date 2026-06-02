@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+
+# Data and generated pipeline artifacts
+data/raw/*
+!data/raw/.gitkeep
+data/parsed/*
+!data/parsed/.gitkeep
+data/chunked/*
+!data/chunked/.gitkeep
+data/entities/*
+!data/entities/.gitkeep
+data/graph/*
+!data/graph/.gitkeep
+
+# Final generated outputs
+outputs/*
+!outputs/.gitkeep
+!outputs/figures/
+!outputs/figures/.gitkeep
+!outputs/figures/*.png
+!outputs/figures/*.jpg
+!outputs/figures/*.jpeg
+
+# Source documents
+*.pdf
+*.docx
+*.pptx
+*.xlsx
+
+# Model weights and runtime caches
+*.bin
+*.safetensors
+*.onnx
+.cache/
+models/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment and logs
+.env
+.env.local
+*.log
