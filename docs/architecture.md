@@ -1,16 +1,16 @@
-# Architecture
+# Архитектура
 
-The project is organized as a reproducible document-to-graph pipeline.
+Проект устроен как воспроизводимый пайплайн `документ -> граф`.
 
-## Phase 1: parsing
+## Phase 1: Парсинг
 
-Entry point: `src/phase1_parsing.py`
+Точка входа: `src/phase1_parsing.py`
 
-Input: source documents from `data/raw/`.
+Вход: исходные документы из `data/raw/` или другой входной папки.
 
-Output: `data/parsed/*_parsed.json`.
+Выход: `data/parsed/*_parsed.json`.
 
-The parser calls MinerU and normalizes the result into a stable JSON schema:
+Фаза вызывает MinerU и нормализует результат в устойчивую JSON-схему:
 
 ```text
 source
@@ -24,78 +24,110 @@ elements[]
 full_markdown
 ```
 
-Each block keeps text, page number, bbox and block index. The `elements` layer stores structured MinerU output such as titles, figures, captions, tables and caption links. This provenance is important because later phases can trace graph nodes back to document regions.
+`blocks` — текстовый слой документа. Каждый блок хранит текст, номер страницы, координаты `bbox` и индекс блока.
 
-## Phase 2: chunking
+`elements` — структурный слой документа. В нём хранятся заголовки, текстовые элементы, рисунки, подписи, таблицы, формулы и связи подписей с рисунками/таблицами.
 
-Entry point: `src/phase2_chunking.py`
+Этот provenance важен, потому что следующие фазы могут восстановить, из какой части документа появился чанк, сущность или связь в графе.
 
-Input: `data/parsed/*_parsed.json`.
+## Phase 2: Чанкинг
 
-Output: `data/chunked/*_chunked.json`.
+Точка входа: `src/phase2_chunking.py`
 
-The default strategy groups blocks by document sections and splits long sections by sentences. Chunks preserve section titles, page ranges, block indices and overlap flags.
+Вход: `data/parsed/*_parsed.json`.
 
-Each chunk also keeps:
+Выход: `data/chunked/*_chunked.json`.
+
+Фаза группирует блоки по разделам документа и режет длинные секции на чанки. Чанки сохраняют:
+
+- заголовок секции;
+- диапазон страниц;
+- индексы исходных блоков;
+- признак overlap;
+- ссылки на исходные структурные элементы.
+
+Каждый чанк также хранит:
 
 - `source_blocks`
 - `source_element_ids` / `source_elements`
 - `related_element_ids` / `related_elements`
 
-This is the bridge between text chunks and structured document elements such as figures and captions.
+Это мост между обычными текстовыми чанками и структурой документа: рисунками, таблицами и подписями.
 
 ## Phase 3: NER
 
-Entry point: `src/phase3_ner.py`
+Точка входа: `src/phase3_ner.py`
 
-Input: `data/chunked/*_chunked.json`.
+Вход: `data/chunked/*_chunked.json`.
 
-Output: `data/entities/*_entities.json`.
+Выход: `data/entities/*_entities.json`.
 
-Available engines:
+Доступные NER-движки:
 
-- `spacy`: fast baseline for standard entity types.
-- `gliner`: zero-shot extraction for domain-specific labels.
-- `llm`: optional API-based extraction path.
+- `spacy` — быстрый baseline для стандартных типов сущностей;
+- `gliner` — zero-shot извлечение доменных сущностей;
+- `llm` — опциональный API-based путь для извлечения сущностей.
 
-Entities inherit chunk provenance, including page range, section, source blocks and related structured elements.
+Сущности наследуют provenance чанка:
 
-## Phase 4: graph baseline
+- диапазон страниц;
+- секцию;
+- исходные блоки;
+- `source_element_ids`;
+- `related_element_ids`.
 
-Entry point: `src/phase4_graph.py`
+Так можно отследить сущность обратно к тексту, таблице, графику или подписи.
 
-Input: `data/entities/*_entities.json`.
+## Phase 4: Baseline-граф
 
-Output: graph files in `data/graph/`.
+Точка входа: `src/phase4_graph.py`
 
-This phase builds a co-occurrence graph: two entities are connected when they occur in the same chunk.
+Вход: `data/entities/*_entities.json`.
 
-## Clean graph rebuild
+Выход: файлы графа в `data/graph/`.
 
-Entry point: `src/phase_cleanup_rebuild.py`
+Эта фаза строит граф совместной встречаемости: две сущности соединяются ребром, если они встретились в одном чанке.
 
-Input: `data/entities/` and `data/chunked/`.
+Это baseline, а не полноценное извлечение смысловых отношений.
 
-Output: final report artifacts in `outputs/`.
+## Clean Graph Rebuild
 
-This phase aggressively filters noisy SpaCy entities, optionally enriches entities with GLiNER, resolves duplicate entities and exports the clean graph.
+Точка входа: `src/phase_cleanup_rebuild.py`
 
-## Phase 5: document linking
+Вход: `data/entities/` и `data/chunked/`.
 
-Entry point: `src/phase5_linking.py`
+Выход: финальные артефакты в `outputs/`.
 
-Input: `data/entities/`, `data/chunked/` and `data/parsed/`.
+Фаза:
 
-Output: document linking artifacts in `outputs/`:
+- фильтрует шумные SpaCy-сущности;
+- опционально добавляет GLiNER-сущности;
+- объединяет дубли;
+- пересобирает чистый entity-граф;
+- экспортирует HTML, GraphML, JSON и метрики.
+
+## Phase 5: Linking-граф Документа
+
+Точка входа: `src/phase5_linking.py`
+
+Вход:
 
 ```text
-document_links.html
-document_links.graphml
-document_links.json
-linking_metrics.json
+data/entities/
+data/chunked/
+data/parsed/
 ```
 
-This phase builds a heterogeneous directed graph with explicit links:
+Выход:
+
+```text
+outputs/document_links.html
+outputs/document_links.graphml
+outputs/document_links.json
+outputs/linking_metrics.json
+```
+
+Фаза строит гетерогенный направленный граф с явными связями:
 
 ```text
 Entity -> MENTIONED_IN -> Chunk
@@ -104,4 +136,4 @@ Chunk  -> RELATED_TO -> Figure/Table/Caption
 Figure -> HAS_CAPTION -> Caption
 ```
 
-The linking graph is separate from the baseline co-occurrence graph. It demonstrates how structured parsing with MinerU can recover context around figures, tables and captions even when the relevant text is chunked separately.
+Linking-граф отделён от baseline-графа совместной встречаемости. Он показывает, как структурный парсинг MinerU помогает восстановить контекст вокруг рисунков, таблиц и подписей даже после разбиения текста на чанки.

@@ -1,117 +1,178 @@
-# Pipeline
+# Пайплайн
 
-## Setup
+Этот файл описывает запуск проекта и правила воспроизводимости. Короткая инструкция для нового пользователя лежит в `README.md`.
+
+## Установка
+
+Обычная установка:
 
 ```bash
 bash scripts/setup_env.sh
 ```
 
-This creates the required directory structure and installs `requirements.txt`.
+Скрипт создаёт структуру папок и устанавливает зависимости из `requirements.txt`.
 
-For a lightweight setup without downloading SpaCy language models:
+Если conda установлена, будет создано окружение `doc-graph`. Если conda нет, будет создано локальное `.venv`.
+
+Активировать conda-окружение:
+
+```bash
+conda activate doc-graph
+export PYTHON_BIN="$(which python)"
+```
+
+Активировать `.venv`:
+
+```bash
+source .venv/bin/activate
+export PYTHON_BIN="$(which python)"
+```
+
+Установка без скачивания SpaCy-моделей:
 
 ```bash
 SKIP_SPACY_MODELS=1 bash scripts/setup_env.sh
 ```
 
-For a lightweight English-only smoke run:
+Лёгкая установка только с маленькой английской моделью:
 
 ```bash
 SPACY_MODELS=en_core_web_sm bash scripts/setup_env.sh
 ```
 
-## Full run
+## Полный Запуск
+
+Для воспроизводимого демо сначала создай входной DOCX:
 
 ```bash
-bash scripts/run_pipeline.sh
+python scripts/create_teacher_demo_input.py
 ```
 
-If HuggingFace model downloads fail, use ModelScope:
+Запусти полный пайплайн:
 
 ```bash
-MINERU_MODEL_SOURCE=modelscope bash scripts/run_pipeline.sh
+bash scripts/run_pipeline.sh data/raw_teacher_demo pipeline 512 1 12
 ```
 
-Phase 1 calls MinerU through the active Python interpreter with `python -m mineru.cli.client`. Check the environment before running:
+Для своих документов положи файлы в `data/raw/` и запусти:
 
 ```bash
-conda activate doc-graph
+bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+Если HuggingFace или загрузка моделей MinerU нестабильны, можно попробовать ModelScope:
+
+```bash
+MINERU_MODEL_SOURCE=modelscope bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+Phase 1 вызывает MinerU через активный Python-интерпретатор. Перед запуском полезно проверить окружение:
+
+```bash
 which python
 python --version
 ```
 
-Expected interpreter:
+Ожидается Python 3.11 из активного окружения.
 
-```text
-/Users/ilyutkinn/anaconda3/envs/doc-graph/bin/python
-Python 3.11.x
-```
+## Что Сохраняет Каждая Фаза
 
-Phase 1 output keeps two complementary layers in every `*_parsed.json` file:
+Phase 1 сохраняет два слоя в каждом `*_parsed.json`:
 
-- `blocks`: text-first blocks used by Phase 2 chunking.
-- `elements`: structured MinerU elements used for document-graph context, including `figure`, `caption`, `table`, `title`, paths to extracted images, table HTML and nearby `caption_of` links.
+- `blocks` — текстовый слой для Phase 2;
+- `elements` — структурный слой MinerU: `figure`, `caption`, `table`, `title`, ссылки на изображения, HTML таблиц и связи подписей.
 
-Phase 2 preserves source context in every `*_chunked.json` chunk:
+Phase 2 сохраняет provenance в каждом `*_chunked.json`:
 
-- `source_blocks`: compact provenance for text blocks used to build the chunk.
-- `source_elements` / `source_element_ids`: Phase 1 elements that directly contributed text.
-- `related_elements` / `related_element_ids`: nearby or section-linked `figure`, `caption`, `table` and `formula` elements.
+- `source_blocks` — краткое описание блоков, из которых собран чанк;
+- `source_elements` / `source_element_ids` — элементы Phase 1, которые напрямую дали текст;
+- `related_elements` / `related_element_ids` — близкие или секционно связанные `figure`, `caption`, `table`, `formula`.
 
-Phase 3 preserves the same context on extracted entities:
+Phase 3 переносит этот контекст на сущности:
 
-- `page_start` / `page_end`, `section_title`, `section_hierarchy`, `block_indices`.
-- `source_element_ids` and `related_element_ids` for linking entities to figures, captions and tables.
+- `page_start` / `page_end`;
+- `section_title`;
+- `section_hierarchy`;
+- `block_indices`;
+- `source_element_ids`;
+- `related_element_ids`.
 
-Phase 5 builds the document linking graph after NER and graph cleanup:
+Phase 5 строит linking-граф после NER:
 
 ```bash
-python src/phase5_linking.py -e data/entities/ -c data/chunked/ -p data/parsed/ -o outputs/ --max-entity-links-per-element 12
+python src/phase5_linking.py \
+  -e data/entities/ \
+  -c data/chunked/ \
+  -p data/parsed/ \
+  -o outputs/ \
+  --max-entity-links-per-element 12
 ```
 
-It exports:
+Он экспортирует:
 
 - `outputs/document_links.html`
 - `outputs/document_links.graphml`
 - `outputs/document_links.json`
 - `outputs/linking_metrics.json`
 
-For large documents, Phase 5 limits `DISCUSSED_NEAR` links to the top-N entities per structured element. The default is 12; use `--max-entity-links-per-element 0` to export every candidate link.
+Для больших документов Phase 5 ограничивает связи `DISCUSSED_NEAR`, оставляя top-N сущностей на каждый структурный элемент. По умолчанию `12`. Значение `0` отключает ограничение.
 
-The HTML view opens in a filtered core mode. Use `Figures`, `Tables`, section/page filters, or the figure/table selector to inspect local neighborhoods instead of the full raw graph.
+HTML-визуализация открывается в отфильтрованном режиме `Core`. Для локального просмотра окружения можно использовать режимы `Figures`, `Tables`, фильтры по секции/странице и селектор конкретного рисунка или таблицы.
 
-Equivalent explicit form:
+## Параметры Полного Скрипта
 
 ```bash
 bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
 ```
 
-By default, `run_pipeline.sh` uses `CLEAN_RUN=1` and removes previous generated artifacts from `data/parsed/`, `data/chunked/`, `data/entities/`, `data/graph/` and `outputs/`. It does not remove source documents from `data/raw/`.
+Аргументы:
 
-To keep old artifacts:
-
-```bash
-CLEAN_RUN=0 bash scripts/run_pipeline.sh
+```text
+1. input_dir       папка с исходными документами
+2. backend         backend MinerU: pipeline, vlm, hybrid, auto
+3. max_tokens      максимальный размер чанка
+4. min_edge_weight минимальный вес ребра в entity-графе
+5. max_entity_links_per_element top-N связей Entity -> Figure/Table/Caption
 ```
 
-## Step-by-step run
+По умолчанию `run_pipeline.sh` использует `CLEAN_RUN=1` и удаляет старые артефакты из:
+
+```text
+data/parsed/
+data/chunked/
+data/entities/
+data/graph/
+outputs/
+```
+
+Исходные документы в `data/raw/` не удаляются.
+
+Чтобы сохранить старые артефакты:
+
+```bash
+CLEAN_RUN=0 bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+## Пошаговый Запуск
 
 ```bash
 python src/phase1_parsing.py -i data/raw/ -o data/parsed/ -b pipeline
 python src/phase2_chunking.py -i data/parsed/ -o data/chunked/ --max-tokens 512
 python src/phase3_ner.py -i data/chunked/ -o data/entities/ --engine spacy
-python src/phase_cleanup_rebuild.py -e data/entities/ -c data/chunked/ -o outputs/ --min-edge-weight 2
+python src/phase_cleanup_rebuild.py -e data/entities/ -c data/chunked/ -o outputs/ --min-edge-weight 1
 python src/phase5_linking.py -e data/entities/ -c data/chunked/ -p data/parsed/ -o outputs/ --max-entity-links-per-element 12
 ```
 
-## Reproducibility checklist
+## Чеклист Воспроизводимости
 
-- Keep source documents in `data/raw/`.
-- Keep generated intermediate files out of git.
-- Record backend, chunk size, NER engine and edge threshold.
-- Use `min_edge_weight=1` for one-document smoke runs; higher thresholds can remove every edge when each co-occurrence appears only once.
-- Save final metrics from `outputs/graph_metrics_clean.json`.
-- Save linking metrics from `outputs/linking_metrics.json`.
-- Record `max_entity_links_per_element` because it changes the density of `DISCUSSED_NEAR` links.
-- Use `python -B -m unittest discover -s tests` before reporting results.
-- Use `bash scripts/check_outputs.sh` after a full run to verify that parsed elements, chunk/entity provenance and exported graphs are present.
+- Зафиксировать входную папку документов.
+- Зафиксировать backend MinerU.
+- Зафиксировать `max_tokens`.
+- Зафиксировать NER engine.
+- Зафиксировать `min_edge_weight`.
+- Зафиксировать `max_entity_links_per_element`, потому что он меняет плотность связей `DISCUSSED_NEAR`.
+- Хранить исходные документы и сгенерированные артефакты вне git.
+- Сохранять метрики из `outputs/graph_metrics_clean.json`.
+- Сохранять метрики из `outputs/linking_metrics.json`.
+- Перед отчётом запускать `python -B -m unittest discover -s tests`.
+- После полного запуска проверять артефакты через `bash scripts/check_outputs.sh`.
