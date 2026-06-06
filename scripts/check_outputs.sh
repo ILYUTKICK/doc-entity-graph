@@ -117,6 +117,15 @@ if linking_metrics.get("caption_links", 0) < caption_links:
     fail("linking_metrics caption_links is lower than parsed caption links")
 if linking_metrics.get("entity_figure_links", 0) == 0 and figures:
     fail("figures exist but no entity_figure_links were produced")
+if "discussed_near_candidates" in linking_metrics:
+    candidates = linking_metrics.get("discussed_near_candidates", 0)
+    kept = linking_metrics.get("discussed_near_kept", 0)
+    pruned = linking_metrics.get("discussed_near_pruned", 0)
+    if kept > candidates:
+        fail("DISCUSSED_NEAR kept count is higher than candidate count")
+    if pruned != max(0, candidates - kept):
+        fail("DISCUSSED_NEAR pruned count does not match candidates - kept")
+    ok(f"DISCUSSED_NEAR candidates/kept/pruned: {candidates}/{kept}/{pruned}")
 
 ok(f"linking graph nodes/edges: {linking_metrics.get('nodes')}/{linking_metrics.get('edges')}")
 print("SUCCESS: pipeline artifacts look consistent")

@@ -186,6 +186,7 @@ def build_linking_graph(
     entities_dir: str,
     chunked_dir: str,
     parsed_dir: str,
+    max_entity_links_per_element: int = 12,
 ):
     """Строит документный linking-граф."""
     import networkx as nx
@@ -287,6 +288,8 @@ def build_linking_graph(
                 add_edge(G, c_node, element_node_id(element_id), "RELATED_TO")
 
     # Entity -> Chunk / Element
+    discussed_near_candidates = defaultdict(dict)
+
     for entity in entities:
         ent_node = entity_node_id(entity)
         doc_name = entity.get("_doc_name", "")
@@ -300,6 +303,8 @@ def build_linking_graph(
             doc_name=doc_name,
             frequency=len(split_csv(entity.get("chunk_id", ""))),
             section_title=entity.get("section_title", ""),
+            page_start=entity.get("page_start", 0),
+            page_end=entity.get("page_end", 0),
             context=entity.get("context", "")[:260],
         )
 
@@ -316,25 +321,59 @@ def build_linking_graph(
         for element_id in entity.get("source_element_ids", []):
             if element_id in elements_by_id:
                 add_edge(G, ent_node, element_node_id(element_id), "EXTRACTED_FROM")
+                collect_discussed_near_candidate(
+                    discussed_near_candidates,
+                    ent_node,
+                    entity,
+                    element_id,
+                    elements_by_id,
+                    chunks_by_id,
+                    base_score=2.0,
+                    reason="source_element",
+                )
 
         for element_id in entity.get("related_element_ids", []):
-            if element_id in elements_by_id:
-                add_edge(G, ent_node, element_node_id(element_id), "DISCUSSED_NEAR")
+            collect_discussed_near_candidate(
+                discussed_near_candidates,
+                ent_node,
+                entity,
+                element_id,
+                elements_by_id,
+                chunks_by_id,
+                base_score=1.0,
+                reason="related_element",
+            )
+
+    discussion_stats = add_ranked_discussed_near_edges(
+        G,
+        discussed_near_candidates,
+        elements_by_id,
+        max_entity_links_per_element=max_entity_links_per_element,
+    )
 
     metrics = compute_linking_metrics(G)
+    metrics.update(discussion_stats)
     log.info(f"Linking-граф построен: {G.number_of_nodes()} узлов, {G.number_of_edges()} рёбер")
     return G, metrics
 
 
-def add_edge(G, source: str, target: str, relation: str, **attrs) -> None:
+def add_edge(
+    G,
+    source: str,
+    target: str,
+    relation: str,
+    weight: float = 1,
+    evidence_count: int = 1,
+    **attrs,
+) -> None:
     """Добавляет или усиливает directed edge с ключом relation."""
     if source == target:
         return
 
     if G.has_edge(source, target, key=relation):
         edge = G[source][target][relation]
-        edge["weight"] = edge.get("weight", 1) + 1
-        edge["evidence_count"] = edge.get("evidence_count", 1) + 1
+        edge["weight"] = round(edge.get("weight", 1) + weight, 4)
+        edge["evidence_count"] = edge.get("evidence_count", 1) + evidence_count
         for key, value in attrs.items():
             if value not in ("", None):
                 edge[key] = value
@@ -345,10 +384,131 @@ def add_edge(G, source: str, target: str, relation: str, **attrs) -> None:
         target,
         key=relation,
         relation=relation,
-        weight=1,
-        evidence_count=1,
+        weight=round(weight, 4),
+        evidence_count=evidence_count,
         **attrs,
     )
+
+
+def collect_discussed_near_candidate(
+    candidates: dict,
+    ent_node: str,
+    entity: dict,
+    element_id: str,
+    elements_by_id: dict,
+    chunks_by_id: dict,
+    base_score: float,
+    reason: str,
+) -> None:
+    """Кандидат Entity -> structured element до top-N фильтрации."""
+    element = elements_by_id.get(element_id)
+    if not element or element.get("element_type") not in STRUCTURED_TYPES:
+        return
+
+    chunk_ids = split_csv(entity.get("chunk_id", ""))
+    evidence_chunks = []
+    score = base_score + min(len(chunk_ids), 8) * 0.15
+
+    for chunk_id in chunk_ids:
+        chunk = chunks_by_id.get(chunk_id, {})
+        if element_id in chunk.get("source_element_ids", []):
+            score += 2.0
+            evidence_chunks.append(chunk_id)
+        if element_id in chunk.get("related_element_ids", []):
+            score += 1.0
+            evidence_chunks.append(chunk_id)
+
+    if _same_section(entity, element):
+        score += 0.4
+    if _same_page(entity, element):
+        score += 0.6
+
+    confidence = entity.get("confidence", 0) or 0
+    score += min(float(confidence), 1.0) * 0.35
+
+    bucket = candidates[element_id]
+    candidate = bucket.setdefault(
+        ent_node,
+        {
+            "score": 0.0,
+            "entity_label": entity.get("text", ""),
+            "entity_type": entity.get("entity_type", ""),
+            "confidence": confidence,
+            "evidence_chunks": set(),
+            "reasons": set(),
+        },
+    )
+    candidate["score"] += score
+    candidate["confidence"] = max(candidate.get("confidence", 0), confidence)
+    candidate["evidence_chunks"].update(evidence_chunks or chunk_ids[:3])
+    candidate["reasons"].add(reason)
+
+
+def add_ranked_discussed_near_edges(
+    G,
+    candidates: dict,
+    elements_by_id: dict,
+    max_entity_links_per_element: int,
+) -> dict:
+    """Оставляет top-N Entity -> Figure/Table/Caption связей для каждого элемента."""
+    total_candidates = sum(len(bucket) for bucket in candidates.values())
+    kept = 0
+
+    for element_id, bucket in candidates.items():
+        element = elements_by_id.get(element_id, {})
+        sorted_candidates = sorted(
+            bucket.items(),
+            key=lambda item: (
+                -item[1].get("score", 0),
+                -len(item[1].get("evidence_chunks", [])),
+                item[1].get("entity_label", ""),
+            ),
+        )
+        if max_entity_links_per_element > 0:
+            sorted_candidates = sorted_candidates[:max_entity_links_per_element]
+
+        for ent_node, candidate in sorted_candidates:
+            evidence_chunks = sorted(candidate.get("evidence_chunks", []))
+            score = round(candidate.get("score", 0), 4)
+            add_edge(
+                G,
+                ent_node,
+                element_node_id(element_id),
+                "DISCUSSED_NEAR",
+                weight=max(score, 1),
+                evidence_count=max(1, len(evidence_chunks)),
+                score=score,
+                reasons=",".join(sorted(candidate.get("reasons", []))),
+                evidence_chunks=",".join(evidence_chunks[:12]),
+                element_type=element.get("element_type", ""),
+            )
+            kept += 1
+
+    return {
+        "max_entity_links_per_element": max_entity_links_per_element,
+        "discussed_near_candidates": total_candidates,
+        "discussed_near_kept": kept,
+        "discussed_near_pruned": max(0, total_candidates - kept),
+    }
+
+
+def _same_section(entity: dict, element: dict) -> bool:
+    entity_section = entity.get("section_title") or ""
+    element_section = element.get("section_title") or ""
+    return bool(entity_section and element_section and entity_section == element_section)
+
+
+def _same_page(entity: dict, element: dict) -> bool:
+    page = element.get("page_number")
+    if page is None:
+        return False
+    try:
+        page = int(page)
+        start = int(entity.get("page_start", page))
+        end = int(entity.get("page_end", start))
+    except (TypeError, ValueError):
+        return False
+    return start <= page <= end
 
 
 def compute_linking_metrics(G) -> dict:
@@ -490,10 +650,11 @@ body{{background:#101113;color:#ddd;font-family:system-ui,-apple-system,sans-ser
 .tooltip{{position:absolute;background:#1f2329;border:1px solid #3b414b;border-radius:8px;padding:10px 12px;max-width:360px;font-size:13px;line-height:1.45;pointer-events:none;opacity:0;transition:opacity .12s;z-index:20}}
 .tooltip b{{color:#fff;font-size:14px}}
 .muted{{color:#9ca3af}}
-#panel{{position:fixed;top:14px;left:14px;background:#171a1f;border:1px solid #303642;border-radius:10px;padding:12px 14px;z-index:10;max-width:340px}}
+#panel{{position:fixed;top:14px;left:14px;background:#171a1f;border:1px solid #303642;border-radius:10px;padding:12px 14px;z-index:10;max-width:390px}}
 #panel h1{{font-size:15px;font-weight:650;margin-bottom:8px;color:#fff}}
 .stat-grid{{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font-size:12px;color:#b8c0cc}}
 .stat-grid b{{font-size:18px;color:#fff;font-weight:650}}
+.hint{{font-size:11px;line-height:1.35;color:#94a3b8;margin-top:8px}}
 #search{{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:10}}
 #search input{{width:320px;background:#1c2026;color:#eee;border:1px solid #3b414b;border-radius:8px;padding:8px 12px;font-size:14px;outline:none}}
 #legend{{position:fixed;right:14px;bottom:14px;background:#171a1f;border:1px solid #303642;border-radius:10px;padding:12px 14px;z-index:10;max-width:270px;max-height:48vh;overflow:auto}}
@@ -504,8 +665,13 @@ body{{background:#101113;color:#ddd;font-family:system-ui,-apple-system,sans-ser
 #controls{{position:fixed;right:14px;top:14px;display:flex;gap:8px;z-index:10}}
 button{{background:#1c2026;color:#ddd;border:1px solid #3b414b;border-radius:7px;padding:7px 10px;cursor:pointer}}
 button:hover{{background:#272c35}}
+button.active{{background:#2563eb;border-color:#3b82f6;color:#fff}}
 .filter-row{{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}}
 .mini{{font-size:12px;padding:5px 8px}}
+.scope-row{{display:grid;grid-template-columns:1fr 105px;gap:8px;margin-top:8px}}
+.focus-row{{margin-top:8px}}
+.focus-row select{{width:100%}}
+select{{min-width:0;background:#1c2026;color:#ddd;border:1px solid #3b414b;border-radius:7px;padding:6px 8px;font-size:12px;outline:none}}
 .hidden{{opacity:.08}}
 </style>
 </head>
@@ -519,11 +685,22 @@ button:hover{{background:#272c35}}
     <div><b id="nEdges">0</b><br>рёбер</div>
     <div><b id="nEntities">0</b><br>сущностей</div>
     <div><b id="nFigures">0</b><br>рисунков</div>
+    <div><b id="nVisible">0</b><br>видно</div>
+    <div><b id="nPruned">0</b><br>скрыто связей</div>
   </div>
+  <div class="hint" id="pruneInfo"></div>
   <div class="filter-row">
-    <button class="mini" onclick="hideChunks()">Hide chunks</button>
-    <button class="mini" onclick="showOnlyCore()">Core view</button>
-    <button class="mini" onclick="showAllTypes()">Show all</button>
+    <button class="mini" data-mode-button="core" onclick="showOnlyCore()">Core</button>
+    <button class="mini" data-mode-button="figures" onclick="showFigureFocus()">Figures</button>
+    <button class="mini" data-mode-button="tables" onclick="showTableFocus()">Tables</button>
+    <button class="mini" data-mode-button="all" onclick="showAllTypes()">Show all</button>
+  </div>
+  <div class="scope-row">
+    <select id="sectionFilter" onchange="setSectionFilter(this.value)"></select>
+    <select id="pageFilter" onchange="setPageFilter(this.value)"></select>
+  </div>
+  <div class="focus-row">
+    <select id="elementFilter" onchange="setElementFocus(this.value)"></select>
   </div>
 </div>
 <div id="search"><input placeholder="Поиск entity / figure / chunk..." oninput="searchGraph(this.value)"></div>
@@ -531,7 +708,7 @@ button:hover{{background:#272c35}}
   <button onclick="zoomBy(1.35)">+</button>
   <button onclick="zoomBy(0.75)">-</button>
   <button onclick="resetZoom()">Reset</button>
-  <button onclick="toggleLabels()">Labels</button>
+  <button id="labelButton" onclick="toggleLabels()">Labels</button>
 </div>
 <div id="legend"></div>
 
@@ -541,14 +718,27 @@ const graph = {graph_data};
 const nodes = graph.nodes;
 const edges = graph.edges;
 const metrics = graph.metrics;
-let activeTypes = new Set(nodes.map(d => d.node_type || "unknown"));
+const CORE_TYPES = ["document", "entity", "figure", "table", "title"];
+const FIGURE_TYPES = ["entity", "figure", "caption"];
+const TABLE_TYPES = ["entity", "table", "caption"];
+let currentMode = "core";
+let activeTypes = new Set(CORE_TYPES.filter(t => nodes.some(d => d.node_type === t)));
 let currentQuery = "";
-let labelsVisible = true;
+let currentSection = "";
+let currentPage = "";
+let currentElementFocus = "";
+let activeElementFocusIds = null;
+let labelsVisible = false;
 
 document.getElementById("nNodes").textContent = metrics.nodes || nodes.length;
 document.getElementById("nEdges").textContent = metrics.edges || edges.length;
 document.getElementById("nEntities").textContent = metrics.entities || 0;
 document.getElementById("nFigures").textContent = metrics.figures || 0;
+document.getElementById("nPruned").textContent = metrics.discussed_near_pruned || 0;
+document.getElementById("pruneInfo").textContent =
+  "DISCUSSED_NEAR top-N: " + (metrics.max_entity_links_per_element || "all") +
+  " на элемент; кандидатов " + (metrics.discussed_near_candidates || 0) +
+  ", оставлено " + (metrics.discussed_near_kept || 0) + ".";
 
 const width = window.innerWidth;
 const height = window.innerHeight;
@@ -559,6 +749,43 @@ svg.call(zoom);
 
 const nodeById = new Map(nodes.map(d => [d.id, d]));
 edges.forEach(e => {{ e.sourceNode = nodeById.get(e.source); e.targetNode = nodeById.get(e.target); }});
+const idOf = value => typeof value === "object" ? value.id : value;
+const figureFocusIds = new Set();
+const tableFocusIds = new Set();
+const coreFocusIds = new Set();
+edges.forEach(e => {{
+  const s = idOf(e.source);
+  const t = idOf(e.target);
+  const sourceNode = nodeById.get(s);
+  const targetNode = nodeById.get(t);
+  if (!sourceNode || !targetNode) return;
+  if (e.relation === "DISCUSSED_NEAR" && targetNode.node_type === "figure") {{
+    figureFocusIds.add(s); figureFocusIds.add(t);
+  }}
+  if (e.relation === "DISCUSSED_NEAR" && targetNode.node_type === "table") {{
+    tableFocusIds.add(s); tableFocusIds.add(t);
+  }}
+}});
+edges.forEach(e => {{
+  const s = idOf(e.source);
+  const t = idOf(e.target);
+  const sourceNode = nodeById.get(s);
+  const targetNode = nodeById.get(t);
+  if (!sourceNode || !targetNode) return;
+  if (["HAS_CAPTION", "CAPTION_OF"].includes(e.relation)) {{
+    if (figureFocusIds.has(s) || figureFocusIds.has(t)) {{
+      figureFocusIds.add(s); figureFocusIds.add(t);
+    }}
+    if (tableFocusIds.has(s) || tableFocusIds.has(t)) {{
+      tableFocusIds.add(s); tableFocusIds.add(t);
+    }}
+  }}
+}});
+figureFocusIds.forEach(id => coreFocusIds.add(id));
+tableFocusIds.forEach(id => coreFocusIds.add(id));
+nodes.forEach(d => {{
+  if (["document", "title"].includes(d.node_type)) coreFocusIds.add(d.id);
+}});
 
 const sim = d3.forceSimulation(nodes)
   .force("link", d3.forceLink(edges).id(d => d.id).distance(d => linkDistance(d)).strength(0.26))
@@ -650,6 +877,7 @@ function zoomBy(k) {{ svg.transition().duration(180).call(zoom.scaleBy, k); }}
 function resetZoom() {{ svg.transition().duration(220).call(zoom.transform, d3.zoomIdentity); }}
 function toggleLabels() {{
   labelsVisible = !labelsVisible;
+  document.getElementById("labelButton").classList.toggle("active", labelsVisible);
   updateVisibility();
 }}
 function searchGraph(q) {{
@@ -665,18 +893,93 @@ function nodeMatchesQuery(d) {{
     (d.entity_type || "").toLowerCase().includes(currentQuery) ||
     (d.id || "").toLowerCase().includes(currentQuery);
 }}
+function nodePages(d) {{
+  if (d.page_number !== undefined && d.page_number !== null && d.page_number !== "") {{
+    const page = Number(d.page_number);
+    return Number.isFinite(page) ? [page] : [];
+  }}
+  if (d.page_start !== undefined && d.page_end !== undefined && d.page_start !== "" && d.page_end !== "") {{
+    const start = Number(d.page_start);
+    const end = Number(d.page_end);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+    const pages = [];
+    for (let p = start; p <= end; p++) pages.push(p);
+    return pages;
+  }}
+  return [];
+}}
+function nodeMatchesScope(d) {{
+  if (d.node_type === "document") return true;
+  if (currentSection && (d.section_title || "") !== currentSection) return false;
+  if (currentPage !== "") {{
+    const page = Number(currentPage);
+    const pages = nodePages(d);
+    if (!pages.includes(page)) return false;
+  }}
+  return true;
+}}
+function nodeMatchesMode(d) {{
+  if (currentElementFocus) return activeElementFocusIds && activeElementFocusIds.has(d.id);
+  if (currentMode === "all") return true;
+  if (currentMode === "core") return coreFocusIds.has(d.id);
+  if (currentMode === "figures") return figureFocusIds.has(d.id);
+  if (currentMode === "tables") return tableFocusIds.has(d.id);
+  return true;
+}}
+function elementFocusIds(focusId) {{
+  if (!focusId) return null;
+  const focus = new Set([focusId]);
+  edges.forEach(e => {{
+    const s = idOf(e.source);
+    const t = idOf(e.target);
+    if (s === focusId || t === focusId) {{
+      focus.add(s); focus.add(t);
+    }}
+  }});
+  edges.forEach(e => {{
+    const s = idOf(e.source);
+    const t = idOf(e.target);
+    if (["HAS_CAPTION", "CAPTION_OF"].includes(e.relation) && (focus.has(s) || focus.has(t))) {{
+      focus.add(s); focus.add(t);
+    }}
+  }});
+  return focus;
+}}
 function nodeVisible(d) {{
-  return activeTypes.has(d.node_type || "unknown") && nodeMatchesQuery(d);
+  return activeTypes.has(d.node_type || "unknown") &&
+    nodeMatchesMode(d) &&
+    nodeMatchesScope(d) &&
+    nodeMatchesQuery(d);
+}}
+function edgeAllowedByMode(d) {{
+  if (currentMode === "all") return true;
+  if (currentElementFocus) {{
+    return ["DISCUSSED_NEAR", "HAS_CAPTION", "CAPTION_OF", "RELATED_TO", "EXTRACTED_FROM", "MENTIONED_IN"].includes(d.relation || "");
+  }}
+  const relation = d.relation || "";
+  if (currentMode === "figures") return ["DISCUSSED_NEAR", "HAS_CAPTION", "CAPTION_OF"].includes(relation);
+  if (currentMode === "tables") return relation === "DISCUSSED_NEAR" || ["HAS_CAPTION", "CAPTION_OF"].includes(relation);
+  return ["DISCUSSED_NEAR", "HAS_CAPTION", "CAPTION_OF"].includes(relation);
 }}
 function updateVisibility() {{
   const visibleIds = new Set(nodes.filter(nodeVisible).map(d => d.id));
-  node.attr("opacity", d => visibleIds.has(d.id) ? 1 : 0.08);
-  label.attr("opacity", d => visibleIds.has(d.id) && labelsVisible ? 1 : 0);
-  link.attr("opacity", d => {{
-    const s = typeof d.source === "object" ? d.source.id : d.source;
-    const t = typeof d.target === "object" ? d.target.id : d.target;
-    return visibleIds.has(s) && visibleIds.has(t) ? 0.42 : 0.018;
+  node.style("display", d => visibleIds.has(d.id) ? null : "none")
+    .attr("opacity", d => visibleIds.has(d.id) ? 1 : 0);
+  label.style("display", d => visibleIds.has(d.id) && labelsVisible ? null : "none")
+    .attr("opacity", d => visibleIds.has(d.id) && labelsVisible ? 1 : 0);
+  link.style("display", d => {{
+    const s = idOf(d.source);
+    const t = idOf(d.target);
+    return visibleIds.has(s) && visibleIds.has(t) && edgeAllowedByMode(d) ? null : "none";
+  }}).attr("opacity", d => {{
+    const relation = d.relation || "";
+    if (relation === "DISCUSSED_NEAR") return 0.48;
+    if (["HAS_CAPTION", "CAPTION_OF"].includes(relation)) return 0.72;
+    return currentMode === "all" ? 0.28 : 0.18;
   }});
+  document.getElementById("nVisible").textContent = visibleIds.size;
+  syncLegend();
+  syncModeButtons();
 }}
 function setType(type, enabled) {{
   if (enabled) activeTypes.add(type); else activeTypes.delete(type);
@@ -688,14 +991,71 @@ function hideChunks() {{
   updateVisibility();
 }}
 function showOnlyCore() {{
-  activeTypes = new Set(["document", "entity", "figure", "caption", "table"]);
-  document.querySelectorAll("[data-node-type]").forEach(cb => cb.checked = activeTypes.has(cb.dataset.nodeType));
+  currentMode = "core";
+  currentElementFocus = "";
+  activeElementFocusIds = null;
+  labelsVisible = false;
+  activeTypes = new Set(CORE_TYPES.filter(t => nodes.some(d => d.node_type === t)));
+  updateVisibility();
+}}
+function showFigureFocus() {{
+  currentMode = "figures";
+  currentElementFocus = "";
+  activeElementFocusIds = null;
+  labelsVisible = false;
+  activeTypes = new Set(FIGURE_TYPES.filter(t => nodes.some(d => d.node_type === t)));
+  updateVisibility();
+}}
+function showTableFocus() {{
+  currentMode = "tables";
+  currentElementFocus = "";
+  activeElementFocusIds = null;
+  labelsVisible = false;
+  activeTypes = new Set(TABLE_TYPES.filter(t => nodes.some(d => d.node_type === t)));
   updateVisibility();
 }}
 function showAllTypes() {{
+  currentMode = "all";
+  currentElementFocus = "";
+  activeElementFocusIds = null;
+  labelsVisible = false;
   activeTypes = new Set(nodes.map(d => d.node_type || "unknown"));
-  document.querySelectorAll("[data-node-type]").forEach(cb => cb.checked = true);
   updateVisibility();
+}}
+function setSectionFilter(value) {{
+  currentSection = value || "";
+  updateVisibility();
+}}
+function setPageFilter(value) {{
+  currentPage = value || "";
+  updateVisibility();
+}}
+function setElementFocus(value) {{
+  currentElementFocus = value || "";
+  if (currentElementFocus) {{
+    currentMode = "element";
+    activeElementFocusIds = elementFocusIds(currentElementFocus);
+    currentSection = "";
+    currentPage = "";
+    document.getElementById("sectionFilter").value = "";
+    document.getElementById("pageFilter").value = "";
+    labelsVisible = false;
+    activeTypes = new Set(["document", "entity", "figure", "caption", "table", "chunk"].filter(t => nodes.some(d => d.node_type === t)));
+  }} else {{
+    activeElementFocusIds = null;
+  }}
+  updateVisibility();
+}}
+function syncLegend() {{
+  document.querySelectorAll("[data-node-type]").forEach(cb => cb.checked = activeTypes.has(cb.dataset.nodeType));
+  document.getElementById("labelButton").classList.toggle("active", labelsVisible);
+}}
+function syncModeButtons() {{
+  document.querySelectorAll("[data-mode-button]").forEach(btn => {{
+    btn.classList.toggle("active", btn.dataset.modeButton === currentMode);
+  }});
+  const elementSelect = document.getElementById("elementFilter");
+  if (elementSelect && elementSelect.value !== currentElementFocus) elementSelect.value = currentElementFocus;
 }}
 function escapeHtml(text) {{
   return String(text).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}}[c]));
@@ -709,7 +1069,7 @@ Object.entries(typeCounts).sort((a,b) => b[1]-a[1]).forEach(([type, count]) => {
   const row = legend.append("label").attr("class", "leg-item");
   row.append("input")
     .attr("type", "checkbox")
-    .attr("checked", true)
+    .property("checked", activeTypes.has(type))
     .attr("data-node-type", type)
     .on("change", function() {{ setType(type, this.checked); }});
   row.append("div").attr("class", "leg-dot").style("background", color);
@@ -723,6 +1083,44 @@ Object.entries(metrics.edge_relation_counts || {{}}).sort((a,b) => b[1]-a[1]).fo
   row.append("div").attr("class", "leg-line").style("border-color", edge.color || "#777");
   row.append("span").text(rel + " (" + count + ")");
 }});
+
+const sectionSelect = document.getElementById("sectionFilter");
+const pageSelect = document.getElementById("pageFilter");
+const elementSelect = document.getElementById("elementFilter");
+sectionSelect.innerHTML = "<option value=''>Все разделы</option>";
+Array.from(new Set(nodes.map(d => d.section_title).filter(Boolean)))
+  .sort((a, b) => a.localeCompare(b, "ru"))
+  .forEach(section => {{
+    const opt = document.createElement("option");
+    opt.value = section;
+    opt.textContent = section.length > 52 ? section.slice(0, 49) + "..." : section;
+    sectionSelect.appendChild(opt);
+  }});
+pageSelect.innerHTML = "<option value=''>Все стр.</option>";
+Array.from(new Set(nodes.flatMap(nodePages)))
+  .sort((a, b) => a - b)
+  .forEach(page => {{
+    const opt = document.createElement("option");
+    opt.value = String(page);
+    opt.textContent = "стр. " + (page + 1);
+    pageSelect.appendChild(opt);
+  }});
+elementSelect.innerHTML = "<option value=''>Фокус: график/таблица</option>";
+nodes
+  .filter(d => ["figure", "table"].includes(d.node_type))
+  .sort((a, b) => {{
+    const pageA = Number(a.page_number ?? 999999);
+    const pageB = Number(b.page_number ?? 999999);
+    if (pageA !== pageB) return pageA - pageB;
+    return (a.label || a.id).localeCompare(b.label || b.id, "ru");
+  }})
+  .forEach(d => {{
+    const opt = document.createElement("option");
+    const page = d.page_number !== undefined && d.page_number !== "" ? "стр. " + (Number(d.page_number) + 1) + " · " : "";
+    opt.value = d.id;
+    opt.textContent = page + (d.ref_label || d.label || d.id).slice(0, 72);
+    elementSelect.appendChild(opt);
+  }});
 updateVisibility();
 </script>
 </body>
@@ -797,6 +1195,10 @@ def print_stats(metrics: dict) -> None:
     print(f"  Figure-caption:    {metrics['caption_links']}")
     print(f"  Entity-figure:     {metrics['entity_figure_links']}")
     print(f"  Entity-table:      {metrics['entity_table_links']}")
+    if "discussed_near_candidates" in metrics:
+        print(f"  DISCUSSED kept:    {metrics['discussed_near_kept']}")
+        print(f"  DISCUSSED pruned:  {metrics['discussed_near_pruned']}")
+        print(f"  Top-N per element: {metrics['max_entity_links_per_element']}")
     print(f"{'─' * 60}")
     print("  Типы рёбер:")
     for relation, count in sorted(metrics["edge_relation_counts"].items(), key=lambda x: -x[1]):
@@ -813,12 +1215,14 @@ def run_phase5(
     chunked_dir: str,
     parsed_dir: str,
     output_dir: str,
+    max_entity_links_per_element: int = 12,
 ):
     """Полный запуск Phase 5."""
     G, metrics = build_linking_graph(
         entities_dir=entities_dir,
         chunked_dir=chunked_dir,
         parsed_dir=parsed_dir,
+        max_entity_links_per_element=max_entity_links_per_element,
     )
     print_stats(metrics)
     export_linking_graph(G, metrics, output_dir)
@@ -833,6 +1237,12 @@ if __name__ == "__main__":
     parser.add_argument("--chunked", "-c", required=True, help="Папка с *_chunked.json")
     parser.add_argument("--parsed", "-p", required=True, help="Папка с *_parsed.json")
     parser.add_argument("--output", "-o", default="outputs", help="Папка для результатов")
+    parser.add_argument(
+        "--max-entity-links-per-element",
+        type=int,
+        default=12,
+        help="Top-N связей Entity -> Figure/Table/Caption на каждый структурный элемент; 0 = без ограничения",
+    )
     args = parser.parse_args()
 
     run_phase5(
@@ -840,6 +1250,7 @@ if __name__ == "__main__":
         chunked_dir=args.chunked,
         parsed_dir=args.parsed,
         output_dir=args.output,
+        max_entity_links_per_element=args.max_entity_links_per_element,
     )
 
     print("Готово!")

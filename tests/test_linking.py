@@ -139,6 +139,94 @@ class LinkingGraphTest(unittest.TestCase):
         self.assertTrue(graph.has_edge(fig_node, cap_node, key="HAS_CAPTION"))
         self.assertEqual(metrics["entity_figure_links"], 1)
         self.assertEqual(metrics["caption_links"], 1)
+        self.assertEqual(metrics["discussed_near_kept"], 2)
+        self.assertEqual(metrics["discussed_near_pruned"], 0)
+
+    def test_discussed_near_edges_are_limited_per_element(self):
+        from src.phase5_linking import build_linking_graph, element_node_id
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parsed_dir = root / "parsed"
+            chunked_dir = root / "chunked"
+            entities_dir = root / "entities"
+            parsed_dir.mkdir()
+            chunked_dir.mkdir()
+            entities_dir.mkdir()
+
+            parsed = {
+                "source": "sample.pdf",
+                "elements": [
+                    {
+                        "element_id": "fig",
+                        "element_type": "figure",
+                        "page_number": 0,
+                        "ref_label": "рис. 1",
+                        "section_title": "Results",
+                    }
+                ],
+            }
+            chunks = []
+            entities = []
+            for idx, text in enumerate(["ARIMA", "VAR", "MAPE"], start=1):
+                chunk_id = f"chunk-{idx}"
+                chunks.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "text": text,
+                        "page_start": 0,
+                        "page_end": 0,
+                        "section_title": "Results",
+                        "source_element_ids": [],
+                        "related_element_ids": ["fig"],
+                    }
+                )
+                entities.append(
+                    {
+                        "text": text,
+                        "normalized": text.lower(),
+                        "entity_type": "CONCEPT",
+                        "confidence": 0.9,
+                        "chunk_id": chunk_id,
+                        "source_doc": "sample.pdf",
+                        "page_start": 0,
+                        "page_end": 0,
+                        "section_title": "Results",
+                        "source_element_ids": [],
+                        "related_element_ids": ["fig"],
+                    }
+                )
+
+            (parsed_dir / "sample_parsed.json").write_text(
+                json.dumps(parsed, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (chunked_dir / "sample_chunked.json").write_text(
+                json.dumps({"source": "sample.pdf", "chunks": chunks}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (entities_dir / "sample_entities.json").write_text(
+                json.dumps({"source": "sample.pdf", "entities": entities}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            graph, metrics = build_linking_graph(
+                entities_dir=str(entities_dir),
+                chunked_dir=str(chunked_dir),
+                parsed_dir=str(parsed_dir),
+                max_entity_links_per_element=2,
+            )
+
+        fig_node = element_node_id("fig")
+        discussed_edges = [
+            edge
+            for edge in graph.in_edges(fig_node, data=True, keys=True)
+            if edge[3].get("relation") == "DISCUSSED_NEAR"
+        ]
+        self.assertEqual(len(discussed_edges), 2)
+        self.assertEqual(metrics["discussed_near_candidates"], 3)
+        self.assertEqual(metrics["discussed_near_kept"], 2)
+        self.assertEqual(metrics["discussed_near_pruned"], 1)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,11 @@ data/entities/*
 !data/entities/.gitkeep
 data/graph/*
 !data/graph/.gitkeep
+data/raw_test/
+data/raw_teacher_demo/
+data/parsed_teacher_demo/
+data/chunked_teacher_demo/
+data/entities_teacher_demo/
 
 # Final generated outputs
 outputs/*
@@ -33,6 +38,7 @@ outputs/*
 !outputs/figures/*.png
 !outputs/figures/*.jpg
 !outputs/figures/*.jpeg
+outputs_teacher_demo/
 
 # Source documents
 *.pdf

@@ -1,8 +1,22 @@
-# Построение графа сущностей документов (MinerU)
+# Doc Entity Graph
 
-Проект строит граф сущностей из неструктурированных документов. На вход подаются PDF/DOCX/PPTX, на выходе получается интерактивная HTML-визуализация, GraphML для Gephi и JSON с метриками.
+Проект строит граф сущностей из неструктурированных документов. На вход подаются `PDF`, `DOCX` или `PPTX`, на выходе получаются интерактивные HTML-графы, `GraphML` для Gephi и JSON-файлы с метриками.
 
-Основной сценарий: MinerU парсит документ в Markdown/JSON, Phase 1 сохраняет текстовые блоки и структурные элементы документа, текст режется на семантические чанки, NER извлекает сущности, затем строятся два графа: baseline-граф сущностей по совместной встречаемости и linking-граф, связывающий сущности с чанками, графиками, подписями и таблицами.
+Главная идея: при обычном чанкинге документа легко потерять связь между текстом, таблицами, графиками и подписями. Здесь MinerU используется не только как OCR/парсер текста, но и как источник структуры документа. Эта структура сохраняется в чанках, переносится на сущности и затем используется для построения linking-графа.
+
+## Что получится
+
+После запуска проект строит два основных графа:
+
+- `outputs/entity_graph_clean.html` — baseline-граф сущностей по совместной встречаемости в чанках.
+- `outputs/document_links.html` — linking-граф документа: сущности, чанки, рисунки, таблицы и подписи.
+
+В linking-графе есть связи:
+
+- `Entity -> MENTIONED_IN -> Chunk`
+- `Entity -> DISCUSSED_NEAR -> Figure/Table/Caption`
+- `Chunk -> RELATED_TO -> Figure/Table/Caption`
+- `Figure -> HAS_CAPTION -> Caption`
 
 ## Архитектура
 
@@ -10,45 +24,124 @@
 PDF/DOCX/PPTX
       |
       v
-MinerU parsing -> Markdown + JSON blocks + structured elements
+MinerU parsing -> text blocks + structured elements
       |
       v
-Semantic chunking -> *_chunked.json
+Semantic chunking -> chunks with provenance
       |
       v
-NER: SpaCy baseline + optional GLiNER
+NER -> entities with provenance
       |
-      v
-Entity resolution + noise filtering
-      |
-      v
-NetworkX graph -> HTML / GraphML / JSON
-      |
-      v
-Document linking graph -> Entity / Chunk / Figure / Caption / Table
+      +-----------------------------+
+      |                             |
+      v                             v
+Entity co-occurrence graph     Document linking graph
 ```
 
+## Требования
+
+Минимально:
+
+- macOS или Linux. На Windows лучше запускать через WSL.
+- `git`
+- `bash`
+- Python 3.11
+- доступ в интернет для первой установки зависимостей и моделей
+
+Рекомендуется:
+
+- `conda`, чтобы создать окружение `doc-graph`
+- 4+ GB свободного места под зависимости и модели
+
+Важно: MinerU может запускать локальный сервис на `127.0.0.1`. Если окружение запрещает локальные порты, Phase 1 может упасть с ошибкой вроде `PermissionError: bind`.
+
 ## Быстрый старт
+
+Склонируй проект и перейди в папку:
+
+```bash
+git clone https://github.com/ILYUTKICK/doc-entity-graph.git
+cd doc-entity-graph
+```
+
+Установи окружение. Обычный вариант:
 
 ```bash
 bash scripts/setup_env.sh
 ```
 
-Скрипт создаёт окружение `doc-graph` через conda. Если conda не установлена, будет создана локальная `.venv`.
-
-Если нужно только проверить структуру без скачивания SpaCy-моделей:
+Если `conda` установлена, скрипт создаст окружение `doc-graph`. Активируй его:
 
 ```bash
-SKIP_SPACY_MODELS=1 bash scripts/setup_env.sh
+conda activate doc-graph
+export PYTHON_BIN="$(which python)"
 ```
 
-Для короткого англоязычного smoke-прогона можно скачать только маленькую английскую модель:
+Если `conda` не установлена, скрипт создаст локальное `.venv`. Активируй его:
+
+```bash
+source .venv/bin/activate
+export PYTHON_BIN="$(which python)"
+```
+
+Для более лёгкой установки можно вместо предыдущей команды скачать только маленькую английскую SpaCy-модель:
 
 ```bash
 SPACY_MODELS=en_core_web_sm bash scripts/setup_env.sh
 ```
 
-## Входные данные
+Если нужно поставить зависимости вообще без скачивания SpaCy-моделей:
+
+```bash
+SKIP_SPACY_MODELS=1 bash scripts/setup_env.sh
+```
+
+## Воспроизводимое Демо
+
+В репозитории не хранятся входные документы, потому что `data/raw/` и сгенерированные данные игнорируются git-ом. Для демонстрации есть генератор небольшого DOCX-документа с текстом, таблицами, графиками и подписями.
+
+Создай демо-документ:
+
+```bash
+python scripts/create_teacher_demo_input.py
+```
+
+Скрипт создаст:
+
+```text
+data/raw_teacher_demo/demo_teacher_pipeline.docx
+data/raw_teacher_demo/demo_teacher_pipeline_source.txt
+```
+
+Запусти полный пайплайн на демо-документе:
+
+```bash
+bash scripts/run_pipeline.sh data/raw_teacher_demo pipeline 512 1 12
+```
+
+Открой результаты:
+
+```bash
+open outputs/document_links.html
+open outputs/entity_graph_clean.html
+```
+
+На Linux вместо `open` используй:
+
+```bash
+xdg-open outputs/document_links.html
+xdg-open outputs/entity_graph_clean.html
+```
+
+Проверь артефакты:
+
+```bash
+bash scripts/check_outputs.sh
+```
+
+Подробный сценарий демонстрации лежит в `docs/teacher_demo.md`.
+
+## Запуск на своих документах
 
 Положи документы в `data/raw/`:
 
@@ -59,86 +152,194 @@ data/raw/
 └── slides.pptx
 ```
 
-Содержимое `data/raw/`, `data/parsed/`, `data/chunked/`, `data/entities/` и `data/graph/` игнорируется git-ом. В репозитории остаются только `.gitkeep`, чтобы структура директорий была воспроизводимой.
-
-## Запуск
-
-Полный пайплайн:
+Запусти пайплайн:
 
 ```bash
-bash scripts/run_pipeline.sh
+bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
 ```
 
-Если HuggingFace нестабилен или MinerU падает на скачивании `opendatalab/PDF-Extract-Kit-1.0`, переключи источник моделей на ModelScope:
-
-```bash
-MINERU_MODEL_SOURCE=modelscope bash scripts/run_pipeline.sh
-```
-
-Фаза 1 запускает MinerU через текущий Python (`python -m mineru.cli.client`), поэтому важно активировать правильное окружение:
-
-```bash
-conda activate doc-graph
-which python
-python --version
-```
-
-Ожидаемый Python:
-
-```text
-/Users/ilyutkinn/anaconda3/envs/doc-graph/bin/python
-Python 3.11.x
-```
-
-Если нужно явно указать бинарник MinerU, можно использовать `MINERU_BIN`:
-
-```bash
-MINERU_BIN="/Users/ilyutkinn/anaconda3/envs/doc-graph/bin/python -m mineru.cli.client" \
-MINERU_MODEL_SOURCE=modelscope \
-bash scripts/run_pipeline.sh
-```
-
-С параметрами:
-
-```bash
-bash scripts/run_pipeline.sh data/raw pipeline 512 1
-```
-
-Аргументы:
+Аргументы `run_pipeline.sh`:
 
 ```text
 1. input_dir       папка с исходными документами, по умолчанию data/raw
 2. backend         backend MinerU: pipeline, vlm, hybrid, auto
 3. max_tokens      максимальный размер чанка
-4. min_edge_weight минимальный вес ребра в очищенном графе. Для одного документа или smoke-запуска ставь `1`; для большого корпуса можно пробовать `2+`.
+4. min_edge_weight минимальный вес ребра в entity-графе
+5. max_entity_links_per_element top-N связей Entity -> Figure/Table/Caption в Phase 5
 ```
 
-NER-движок можно выбрать через переменную окружения:
+Для одного документа или короткого демо обычно подходит `min_edge_weight=1`. Для большого корпуса можно пробовать `2` и выше.
+
+По умолчанию запуск очищает старые промежуточные файлы в `data/parsed/`, `data/chunked/`, `data/entities/`, `data/graph/` и `outputs/`, но не трогает исходные документы. Чтобы сохранить старые артефакты:
 
 ```bash
-NER_ENGINE=spacy bash scripts/run_pipeline.sh
-NER_ENGINE=gliner bash scripts/run_pipeline.sh
+CLEAN_RUN=0 bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
 ```
 
-По умолчанию `run_pipeline.sh` делает clean run: очищает старые промежуточные файлы в `data/parsed/`, `data/chunked/`, `data/entities/`, `data/graph/` и `outputs/`, но не трогает `data/raw/`. Чтобы сохранить старые артефакты:
+## Переменные окружения
+
+Можно менять поведение пайплайна через переменные:
 
 ```bash
-CLEAN_RUN=0 bash scripts/run_pipeline.sh
+PYTHON_BIN="$(which python)"
+NER_ENGINE=spacy
+CLEAN_RUN=1
+MAX_ENTITY_LINKS_PER_ELEMENT=12
+MINERU_MODEL_SOURCE=modelscope
 ```
 
-Пошаговый запуск:
+Примеры:
 
 ```bash
-python src/phase1_parsing.py -i data/raw/ -o data/parsed/ -b pipeline
-python src/phase2_chunking.py -i data/parsed/ -o data/chunked/ --max-tokens 512
-python src/phase3_ner.py -i data/chunked/ -o data/entities/ --engine spacy
-python src/phase_cleanup_rebuild.py -e data/entities/ -c data/chunked/ -o outputs/ --min-edge-weight 2
-python src/phase5_linking.py -e data/entities/ -c data/chunked/ -p data/parsed/ -o outputs/
+NER_ENGINE=spacy bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+```bash
+MINERU_MODEL_SOURCE=modelscope bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+Если нужно явно указать команду MinerU:
+
+```bash
+MINERU_BIN="$(which python) -m mineru.cli.client" \
+bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+## Пошаговый запуск
+
+Полный пайплайн можно запускать по фазам. Это удобно для отладки и демонстрации.
+
+Подготовь входную папку:
+
+```bash
+export PYTHON_BIN="$(which python)"
+python scripts/create_teacher_demo_input.py
+export INPUT_DIR=data/raw_teacher_demo
+```
+
+### Phase 1: Parsing
+
+```bash
+$PYTHON_BIN src/phase1_parsing.py \
+  -i "$INPUT_DIR" \
+  -o data/parsed/ \
+  -b pipeline
+```
+
+Что делает: запускает MinerU и сохраняет текстовые блоки и структурные элементы документа.
+
+Выход:
+
+```text
+data/parsed/*_parsed.json
+```
+
+Важные поля:
+
+- `blocks` — текстовый слой для чанкинга.
+- `elements` — структурный слой: `title`, `text`, `figure`, `caption`, `table`, `formula`, `list`.
+
+### Phase 2: Chunking
+
+```bash
+$PYTHON_BIN src/phase2_chunking.py \
+  -i data/parsed/ \
+  -o data/chunked/ \
+  --max-tokens 512
+```
+
+Что делает: режет текст на чанки и сохраняет provenance.
+
+Выход:
+
+```text
+data/chunked/*_chunked.json
+```
+
+Важные поля чанка:
+
+- `source_blocks`
+- `source_element_ids`
+- `source_elements`
+- `related_element_ids`
+- `related_elements`
+
+### Phase 3: NER
+
+```bash
+$PYTHON_BIN src/phase3_ner.py \
+  -i data/chunked/ \
+  -o data/entities/ \
+  --engine spacy
+```
+
+Что делает: извлекает сущности и переносит provenance с чанков на сущности.
+
+Выход:
+
+```text
+data/entities/*_entities.json
+```
+
+Важные поля сущности:
+
+- `text`
+- `normalized`
+- `entity_type`
+- `chunk_id`
+- `section_title`
+- `source_element_ids`
+- `related_element_ids`
+
+### Phase 4: Clean Entity Graph
+
+```bash
+$PYTHON_BIN src/phase_cleanup_rebuild.py \
+  -e data/entities/ \
+  -c data/chunked/ \
+  -o outputs/ \
+  --min-edge-weight 1
+```
+
+Что делает: чистит шумные сущности, опционально добавляет GLiNER, объединяет дубли и строит baseline-граф сущностей по совместной встречаемости.
+
+Выход:
+
+```text
+outputs/entity_graph_clean.html
+outputs/entity_graph_clean.graphml
+outputs/entity_graph_clean.json
+outputs/resolved_entities_clean.json
+outputs/graph_metrics_clean.json
+```
+
+Если GLiNER или HuggingFace недоступны, эта фаза продолжит работу на очищенных SpaCy-сущностях.
+
+### Phase 5: Document Linking Graph
+
+```bash
+$PYTHON_BIN src/phase5_linking.py \
+  -e data/entities/ \
+  -c data/chunked/ \
+  -p data/parsed/ \
+  -o outputs/ \
+  --max-entity-links-per-element 12
+```
+
+Что делает: строит документный linking-граф, где сущности связаны с чанками, рисунками, таблицами и подписями.
+
+Выход:
+
+```text
+outputs/document_links.html
+outputs/document_links.graphml
+outputs/document_links.json
+outputs/linking_metrics.json
 ```
 
 ## Результаты
 
-После успешного запуска основные артефакты появятся в `outputs/`:
+После успешного запуска основные файлы будут в `outputs/`:
 
 ```text
 outputs/
@@ -153,62 +354,84 @@ outputs/
 └── graph_metrics_clean.json
 ```
 
-Открыть граф:
+Метрики для отчёта:
 
-```bash
-open outputs/entity_graph_clean.html
-open outputs/document_links.html
-```
+- `outputs/graph_metrics_clean.json`
+- `outputs/linking_metrics.json`
 
-Метрики для отчёта лучше брать из `outputs/graph_metrics_clean.json`; README не фиксирует числа, потому что они зависят от набора документов, backend MinerU, NER-движка и порогов фильтрации.
-
-Phase 1 сохраняет в `data/parsed/*_parsed.json` два слоя:
-
-- `blocks` — совместимый текстовый слой для чанкинга.
-- `elements` — структурный слой MinerU: `title`, `text`, `figure`, `caption`, `table`, `formula`, `list` с `page_number`, `bbox`, `image_path`, `table_html`, `ref_label` и простыми связями `caption_of`.
-
-Phase 2 сохраняет provenance в `data/chunked/*_chunked.json`: каждый чанк содержит `source_blocks`, `source_element_ids`, `source_elements`, `related_element_ids` и `related_elements`. Это позволяет связать текст чанка с ближайшими графиками, подписями и таблицами.
-
-Phase 3 переносит provenance на сущности в `data/entities/*_entities.json`: каждая сущность хранит `page_start/page_end`, `section_title`, `block_indices`, `source_element_ids` и `related_element_ids`. Благодаря этому можно проверить, что сущность была извлечена из текста, связанного с конкретным графиком или таблицей.
-
-Phase 5 строит linking-граф документа в `outputs/document_links.*`. В нём есть явные связи `Entity -> MENTIONED_IN -> Chunk`, `Entity -> DISCUSSED_NEAR -> Figure/Table`, `Chunk -> RELATED_TO -> Figure/Caption/Table` и `Figure -> HAS_CAPTION -> Caption`.
-
-## Как это отвечает задаче
-
-Проблема обычного RAG/чанкинга в том, что текстовый чанк может оказаться далеко от связанного графика, подписи или таблицы. Тогда модель видит кусок текста, но теряет структурное окружение документа.
-
-В этом проекте MinerU используется не только как OCR/Markdown-парсер, а как источник структуры документа:
-
-- Phase 1 извлекает `figure`, `caption`, `table`, `title` и связывает подписи с графиками.
-- Phase 2 сохраняет, какие блоки и элементы породили каждый чанк.
-- Phase 3 переносит этот provenance на найденные сущности.
-- Phase 5 строит linking-граф, где видно, какая сущность обсуждается рядом с каким рисунком, подписью или таблицей.
-
-На текущем документе найдено 14 графиков, 14 подписей и 14 связей `Figure -> HAS_CAPTION -> Caption`; linking-граф содержит 61 связь `Entity -> DISCUSSED_NEAR -> Figure`.
+HTML-визуализации используют D3.js через CDN. Для просмотра HTML нужен доступ к CDN или локально подключённый D3.
 
 ## Проверка
 
-Минимальные smoke-тесты не требуют скачанных моделей:
+Smoke-тесты:
 
 ```bash
 python -B -m unittest discover -s tests
 ```
 
-Проверка, что после запуска пайплайна появились все ключевые артефакты и что provenance не потерялся:
+Проверка артефактов после запуска:
 
 ```bash
 bash scripts/check_outputs.sh
 ```
 
-Проверка синтаксиса:
+Проверка синтаксиса основных модулей:
 
 ```bash
-python -B -m py_compile src/phase1_parsing.py src/phase2_chunking.py src/phase3_ner.py src/phase4_graph.py src/phase_cleanup_rebuild.py src/phase5_linking.py
+python -B -m py_compile \
+  src/phase1_parsing.py \
+  src/phase2_chunking.py \
+  src/phase3_ner.py \
+  src/phase4_graph.py \
+  src/phase_cleanup_rebuild.py \
+  src/phase5_linking.py
 ```
 
-## Конфигурация
+## Troubleshooting
 
-Базовые параметры эксперимента лежат в `configs/default.yaml`, GLiNER-labels - в `configs/ner_labels.yaml`. Сейчас CLI-скрипты принимают параметры напрямую; конфиги добавлены как единая точка правды для отчёта и будущей автоматизации.
+### В `data/raw/` нет документов
+
+Пайплайн обрабатывает только поддерживаемые форматы:
+
+```text
+pdf, docx, pptx
+```
+
+Для демо сначала создай входной DOCX:
+
+```bash
+python scripts/create_teacher_demo_input.py
+```
+
+### MinerU не скачивает модели
+
+Попробуй ModelScope:
+
+```bash
+MINERU_MODEL_SOURCE=modelscope bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+### GLiNER или HuggingFace недоступны
+
+Это не блокирует весь проект. Phase 4 продолжит работу на SpaCy-сущностях. Для базового запуска можно оставить:
+
+```bash
+NER_ENGINE=spacy bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+### Ошибка локального порта MinerU
+
+Если Phase 1 падает с ошибкой про `127.0.0.1` или `PermissionError: bind`, значит окружение запрещает локальный сервис MinerU. Запусти проект в обычном терминале, WSL или окружении, где разрешены локальные порты.
+
+### HTML открылся, но граф пустой
+
+Сначала проверь артефакты:
+
+```bash
+bash scripts/check_outputs.sh
+```
+
+Если `document_links.html` пустой, скорее всего Phase 5 не увидела файлы в `data/parsed/`, `data/chunked/` или `data/entities/`. Перезапусти полный пайплайн с `CLEAN_RUN=1`.
 
 ## Структура
 
@@ -217,9 +440,7 @@ doc-entity-graph/
 ├── README.md
 ├── requirements.txt
 ├── requirements-vlm.txt
-├── .gitignore
 ├── src/
-│   ├── __init__.py
 │   ├── phase1_parsing.py
 │   ├── phase2_chunking.py
 │   ├── phase3_ner.py
@@ -227,13 +448,7 @@ doc-entity-graph/
 │   ├── phase5_linking.py
 │   └── phase_cleanup_rebuild.py
 ├── configs/
-│   ├── default.yaml
-│   └── ner_labels.yaml
 ├── docs/
-│   ├── architecture.md
-│   ├── pipeline.md
-│   └── results.md
-├── notebooks/
 ├── data/
 │   ├── raw/
 │   ├── parsed/
@@ -241,18 +456,17 @@ doc-entity-graph/
 │   ├── entities/
 │   └── graph/
 ├── outputs/
-│   └── figures/
 ├── scripts/
 │   ├── setup_env.sh
 │   ├── run_pipeline.sh
-│   └── check_outputs.sh
+│   ├── check_outputs.sh
+│   └── create_teacher_demo_input.py
 └── tests/
 ```
 
 ## Ограничения
 
-Связи в графе сейчас являются baseline-связями по совместной встречаемости сущностей в одном чанке. Это не полноценный relation extraction. Для учебного проекта это хороший воспроизводимый baseline, но в отчёте стоит явно отделять co-occurrence graph от графа фактических отношений.
-
-## Лицензия
-
-MIT
+- Baseline-граф строится по совместной встречаемости сущностей в чанках. Это не полноценный relation extraction.
+- Качество NER зависит от языка документа и доступных моделей.
+- Для больших документов linking-граф может быть очень плотным, поэтому Phase 5 ограничивает число связей `DISCUSSED_NEAR` параметром `--max-entity-links-per-element`.
+- Входные документы и результаты игнорируются git-ом. Для воспроизводимого демо используется генератор `scripts/create_teacher_demo_input.py`.

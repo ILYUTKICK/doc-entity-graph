@@ -66,7 +66,7 @@ Phase 3 preserves the same context on extracted entities:
 Phase 5 builds the document linking graph after NER and graph cleanup:
 
 ```bash
-python src/phase5_linking.py -e data/entities/ -c data/chunked/ -p data/parsed/ -o outputs/
+python src/phase5_linking.py -e data/entities/ -c data/chunked/ -p data/parsed/ -o outputs/ --max-entity-links-per-element 12
 ```
 
 It exports:
@@ -76,10 +76,14 @@ It exports:
 - `outputs/document_links.json`
 - `outputs/linking_metrics.json`
 
+For large documents, Phase 5 limits `DISCUSSED_NEAR` links to the top-N entities per structured element. The default is 12; use `--max-entity-links-per-element 0` to export every candidate link.
+
+The HTML view opens in a filtered core mode. Use `Figures`, `Tables`, section/page filters, or the figure/table selector to inspect local neighborhoods instead of the full raw graph.
+
 Equivalent explicit form:
 
 ```bash
-bash scripts/run_pipeline.sh data/raw pipeline 512 1
+bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
 ```
 
 By default, `run_pipeline.sh` uses `CLEAN_RUN=1` and removes previous generated artifacts from `data/parsed/`, `data/chunked/`, `data/entities/`, `data/graph/` and `outputs/`. It does not remove source documents from `data/raw/`.
@@ -97,7 +101,7 @@ python src/phase1_parsing.py -i data/raw/ -o data/parsed/ -b pipeline
 python src/phase2_chunking.py -i data/parsed/ -o data/chunked/ --max-tokens 512
 python src/phase3_ner.py -i data/chunked/ -o data/entities/ --engine spacy
 python src/phase_cleanup_rebuild.py -e data/entities/ -c data/chunked/ -o outputs/ --min-edge-weight 2
-python src/phase5_linking.py -e data/entities/ -c data/chunked/ -p data/parsed/ -o outputs/
+python src/phase5_linking.py -e data/entities/ -c data/chunked/ -p data/parsed/ -o outputs/ --max-entity-links-per-element 12
 ```
 
 ## Reproducibility checklist
@@ -108,5 +112,6 @@ python src/phase5_linking.py -e data/entities/ -c data/chunked/ -p data/parsed/ 
 - Use `min_edge_weight=1` for one-document smoke runs; higher thresholds can remove every edge when each co-occurrence appears only once.
 - Save final metrics from `outputs/graph_metrics_clean.json`.
 - Save linking metrics from `outputs/linking_metrics.json`.
+- Record `max_entity_links_per_element` because it changes the density of `DISCUSSED_NEAR` links.
 - Use `python -B -m unittest discover -s tests` before reporting results.
 - Use `bash scripts/check_outputs.sh` after a full run to verify that parsed elements, chunk/entity provenance and exported graphs are present.

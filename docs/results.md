@@ -1,6 +1,6 @@
 # Results
 
-This file records the latest reproducible run on the current document set.
+This file records an example reproducible run. Recompute these values after changing the documents in `data/raw/`.
 
 ## Run configuration
 
@@ -10,6 +10,7 @@ Chunk max tokens: 512
 NER engine: SpaCy + GLiNER enrichment
 GLiNER model: urchade/gliner_multi-v2.1
 Minimum edge weight: 1
+Max entity links per structured element: 12
 Documents: 2
 ```
 
@@ -42,6 +43,15 @@ Figure-caption links: 14
 Entity-figure links: 61
 Entity-table links: 2
 Chunk-related links: 41
+```
+
+For large documents, also report the Phase 5 pruning fields from `outputs/linking_metrics.json`:
+
+```text
+DISCUSSED_NEAR candidates:
+DISCUSSED_NEAR kept:
+DISCUSSED_NEAR pruned:
+Max entity links per structured element:
 ```
 
 ## Entity distribution

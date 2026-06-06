@@ -2,12 +2,13 @@
 # Полный пайплайн: от PDF до графа сущностей.
 #
 # Usage:
-#   bash scripts/run_pipeline.sh [input_dir] [backend] [max_tokens] [min_edge_weight]
+#   bash scripts/run_pipeline.sh [input_dir] [backend] [max_tokens] [min_edge_weight] [max_entity_links_per_element]
 #
 # Environment variables:
 #   PYTHON_BIN=python
 #   NER_ENGINE=spacy
 #   CLEAN_RUN=1
+#   MAX_ENTITY_LINKS_PER_ELEMENT=12
 
 set -Eeuo pipefail
 
@@ -20,6 +21,7 @@ INPUT_DIR="${1:-data/raw}"
 BACKEND="${2:-pipeline}"
 MAX_TOKENS="${3:-512}"
 MIN_EDGE_WEIGHT="${4:-1}"
+MAX_ENTITY_LINKS_PER_ELEMENT="${5:-${MAX_ENTITY_LINKS_PER_ELEMENT:-12}}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 NER_ENGINE="${NER_ENGINE:-spacy}"
 CLEAN_RUN="${CLEAN_RUN:-1}"
@@ -60,6 +62,7 @@ echo "  Backend:   ${BACKEND}"
 echo "  Max tokens: ${MAX_TOKENS}"
 echo "  NER:       ${NER_ENGINE}"
 echo "  Min edge:  ${MIN_EDGE_WEIGHT}"
+echo "  Link top-N:${MAX_ENTITY_LINKS_PER_ELEMENT}"
 echo "  Clean run: ${CLEAN_RUN}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
@@ -137,7 +140,8 @@ echo "═══ Фаза 5: Linking-граф документа ═══"
     -e data/entities/ \
     -c data/chunked/ \
     -p data/parsed/ \
-    -o outputs/
+    -o outputs/ \
+    --max-entity-links-per-element "$MAX_ENTITY_LINKS_PER_ELEMENT"
 require_files "outputs" "document_links.html" "Фаза 5"
 echo ""
 
