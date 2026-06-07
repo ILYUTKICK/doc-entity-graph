@@ -1,41 +1,13 @@
+"""Фаза 1: парсинг исходных документов через MinerU.
+
+Вход:
+    PDF/DOCX/PPTX-файлы из входной директории.
+
+Выход:
+    ``data/parsed/*_parsed.json`` с двумя слоями данных:
+    ``blocks`` для чанкинга текста и ``elements`` для структуры документа:
+    заголовков, рисунков, подписей и таблиц.
 """
-═══════════════════════════════════════════════════════════════
-  Фаза 1: Парсинг документов с MinerU
-  Проект: Построение графа сущностей документов
-═══════════════════════════════════════════════════════════════
-
-Этот скрипт покрывает:
-  1. Установку и настройку MinerU
-  2. Парсинг PDF/DOCX/PPTX/изображений
-  3. Постобработку результатов
-  4. Подготовку данных для следующей фазы (чанкинг + NER)
-
-Требования:
-  - Python 3.10-3.13
-  - GPU (рекомендуется) или CPU
-  - pip install mineru[all]
-"""
-
-# ══════════════════════════════════════════════════════════════
-# ЧАСТЬ 0: УСТАНОВКА
-# ══════════════════════════════════════════════════════════════
-
-# --- Вариант A: Базовая установка (Pipeline backend, работает на CPU) ---
-# pip install --upgrade pip
-# pip install uv
-# uv pip install -U "mineru[all]"
-
-# --- Вариант B: Только VLM backend (MinerU 2.5, нужна GPU) ---
-# pip install "mineru-vl-utils[vllm]"
-
-# --- Вариант C: Docker (самый простой для production) ---
-# docker pull opendatalab/mineru:latest
-# docker run -p 8000:8000 opendatalab/mineru:latest
-
-# --- Настройка источника моделей (если HuggingFace недоступен) ---
-# import os
-# os.environ["MINERU_MODEL_SOURCE"] = "modelscope"
-
 
 import os
 import sys
@@ -165,7 +137,7 @@ def parse_via_cli(
 
 
 # ══════════════════════════════════════════════════════════════
-# ЧАСТЬ 3: ПАРСИНГ ЧЕРЕЗ API (для production и батчей)
+# ЧАСТЬ 3: ПАРСИНГ ЧЕРЕЗ API
 # ══════════════════════════════════════════════════════════════
 
 def parse_via_api(
@@ -174,15 +146,7 @@ def parse_via_api(
     poll_interval: float = 2.0,
     timeout: int = 300,
 ) -> dict:
-    """
-    Парсинг через FastAPI-сервер MinerU.
-
-    Предварительно запустить сервер:
-      mineru-api --host 0.0.0.0 --port 8000
-
-    Для VLM с предзагрузкой модели:
-      mineru-api --host 0.0.0.0 --port 8000 --enable-vlm-preload true
-    """
+    """Парсинг через уже запущенный HTTP API MinerU."""
     import requests
 
     # Асинхронная отправка задачи
@@ -219,21 +183,11 @@ def parse_via_api(
 
 
 # ══════════════════════════════════════════════════════════════
-# ЧАСТЬ 4: ПАРСИНГ ЧЕРЕЗ VLM НАПРЯМУЮ (MinerU 2.5)
+# ЧАСТЬ 4: ПАРСИНГ ЧЕРЕЗ VLM НАПРЯМУЮ
 # ══════════════════════════════════════════════════════════════
 
 def parse_via_vlm_direct(image_path: str) -> str:
-    """
-    Прямой вызов MinerU 2.5 VLM для одной страницы.
-    Использует двухстадийный coarse-to-fine парсинг.
-
-    Требования:
-      pip install "mineru-vl-utils[transformers]"
-      GPU с минимум 4GB VRAM
-
-    Для батч-обработки используйте vllm backend:
-      pip install "mineru-vl-utils[vllm]"
-    """
+    """Прямой вызов MinerU VLM для одной страницы/изображения."""
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
     from PIL import Image
     from mineru_vl_utils import MinerUClient
@@ -993,6 +947,13 @@ def save_for_next_phase(doc: ParsedDocument, output_path: str):
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".xlsx", ".png", ".jpg", ".jpeg"}
 
 
+def _is_supported_input_file(path: Path) -> bool:
+    """True for real source files; skips editor lock/temporary files."""
+    if path.name.startswith("~$") or path.name.startswith("."):
+        return False
+    return path.suffix.lower() in SUPPORTED_EXTENSIONS
+
+
 def batch_parse(
     input_dir: str,
     output_dir: str,
@@ -1018,7 +979,7 @@ def batch_parse(
     # Поиск файлов
     files = [
         f for f in input_path.rglob("*")
-        if f.suffix.lower() in SUPPORTED_EXTENSIONS
+        if _is_supported_input_file(f)
     ]
     log.info(f"Найдено файлов для парсинга: {len(files)}")
 
@@ -1087,21 +1048,6 @@ def batch_parse(
 # ══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    """
-    Примеры запуска:
-
-    1. Один файл через CLI:
-       python phase1_parsing.py --input paper.pdf --output ./parsed
-
-    2. Папка с документами:
-       python phase1_parsing.py --input ./documents/ --output ./parsed
-
-    3. С VLM backend (точнее, но нужна GPU):
-       python phase1_parsing.py --input ./documents/ --output ./parsed --backend vlm
-
-    4. Через API (запустить mineru-api отдельно):
-       python phase1_parsing.py --input paper.pdf --output ./parsed --use-api
-    """
     import argparse
 
     parser = argparse.ArgumentParser(description="Фаза 1: Парсинг документов с MinerU")

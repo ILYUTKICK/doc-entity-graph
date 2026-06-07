@@ -74,7 +74,7 @@ if [ ! -d "$INPUT_DIR" ]; then
     exit 1
 fi
 
-FILE_COUNT=$(find "$INPUT_DIR" -type f \( -name "*.pdf" -o -name "*.docx" -o -name "*.pptx" \) | wc -l | tr -d ' ')
+FILE_COUNT=$(find "$INPUT_DIR" -type f ! -name '~$*' \( -name "*.pdf" -o -name "*.docx" -o -name "*.pptx" \) | wc -l | tr -d ' ')
 if [ "$FILE_COUNT" -eq 0 ]; then
     echo "✗ В ${INPUT_DIR}/ нет поддерживаемых документов."
     echo "  Положите PDF/DOCX/PPTX файлы и перезапустите."

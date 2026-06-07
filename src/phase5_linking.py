@@ -1,26 +1,13 @@
-"""
-═══════════════════════════════════════════════════════════════
-  Фаза 5: Linking-граф документа
-  Проект: Построение графа сущностей документов
-═══════════════════════════════════════════════════════════════
+"""Фаза 5: построение linking-графа документа.
 
 Вход:
-  - data/entities/*_entities.json  — сущности с provenance из Фазы 3
-  - data/chunked/*_chunked.json    — чанки с source/related elements
-  - data/parsed/*_parsed.json      — структурные элементы MinerU
+    Структурные элементы из Фазы 1, чанки из Фазы 2 и сущности из Фазы 3.
 
 Выход:
-  - outputs/document_links.html
-  - outputs/document_links.graphml
-  - outputs/document_links.json
-  - outputs/linking_metrics.json
+    ``outputs/document_links.*`` и ``outputs/linking_metrics.json``.
 
-Идея:
-  Строим явный документный граф:
-    Entity -> MENTIONED_IN -> Chunk
-    Chunk  -> RELATED_TO   -> Figure/Table/Caption
-    Entity -> DISCUSSED_NEAR -> Figure/Table/Caption
-    Figure -> HAS_CAPTION  -> Caption
+Граф связывает сущности с чанками, рисунками, таблицами и подписями, чтобы
+структура документа оставалась видимой после чанкинга текста.
 """
 
 import json

@@ -1,27 +1,15 @@
-"""
-═══════════════════════════════════════════════════════════════
-  Фаза 3: Извлечение сущностей (NER)
-  Проект: Построение графа сущностей документов
-═══════════════════════════════════════════════════════════════
+"""Фаза 3: извлечение именованных сущностей из чанков.
 
-Вход:  *_chunked.json из Фазы 2
-Выход: *_entities.json — сущности + контекст для графа (Фаза 4+)
+Вход:
+    ``data/chunked/*_chunked.json`` из Фазы 2.
 
-Три NER-движка (выбираются автоматически или вручную):
-  1. SpaCy     — быстрый, CPU, базовые типы (PER/ORG/LOC/DATE)
-  2. GLiNER    — zero-shot, произвольные типы без дообучения
-  3. LLM       — самый гибкий, через API (Claude / OpenAI / локальная модель)
+Выход:
+    ``data/entities/*_entities.json`` с нормализованными сущностями и
+    сохранённой привязкой к чанкам и документам.
 
-Установка:
-  pip install spacy
-  python -m spacy download ru_core_news_lg
-  python -m spacy download en_core_web_sm
-  pip install gliner              # (опционально, для GLiNER)
-
-Запуск:
-  python phase3_ner.py -i ./chunked/ -o ./entities/
-  python phase3_ner.py -i ./chunked/ -o ./entities/ --engine gliner
-  python phase3_ner.py -i ./chunked/ -o ./entities/ --engine llm --api-key sk-...
+Движки:
+    ``spacy`` для базового NER, ``gliner`` для zero-shot доменных меток и
+    ``llm`` для опционального API-режима.
 """
 
 import json
@@ -207,8 +195,6 @@ class GLiNEREngine:
     """
     Zero-shot NER через GLiNER.
     Позволяет задавать произвольные типы сущностей без дообучения.
-
-    pip install gliner
     """
 
     # Типы, релевантные для финансовых документов
