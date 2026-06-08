@@ -66,6 +66,6 @@ python -c "import networkx; print('  NetworkX: OK (' + networkx.__version__ + ')
 python -B -m unittest discover -s tests
 
 echo ""
-echo "🎉 Всё готово!"
+echo " Всё готово!"
 echo "   1. Положите документы в data/raw/"
 echo "   2. Запустите: bash scripts/run_pipeline.sh"
