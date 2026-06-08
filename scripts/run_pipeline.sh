@@ -146,7 +146,7 @@ require_files "outputs" "document_links.html" "Фаза 5"
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  🎉 ГОТОВО!"
+echo "   ГОТОВО!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "  Граф сущностей:       outputs/entity_graph_clean.html"
