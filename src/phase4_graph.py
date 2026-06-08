@@ -609,7 +609,7 @@ def export_graph(G, resolved_entities: list[dict], metrics: dict, output_dir: st
 def print_stats(G, metrics: dict, resolved_entities: list[dict]):
     """Вывод статистики графа."""
     print(f"\n{'═' * 60}")
-    print(f"  🕸  ГРАФ СУЩНОСТЕЙ")
+    print(f"    ГРАФ СУЩНОСТЕЙ")
     print(f"{'═' * 60}")
     print(f"  Узлов:          {metrics['nodes']}")
     print(f"  Рёбер:          {metrics['edges']}")
@@ -706,7 +706,7 @@ if __name__ == "__main__":
 
     G, resolved, metrics = build_entity_graph(args.input, args.output)
 
-    print(f"🎉 Готово!")
+    print(f" Готово!")
     print(f"   Граф: {args.output}/entity_graph.html (открой в браузере!)")
     print(f"   GraphML: {args.output}/entity_graph.graphml (для Gephi)")
     print(f"   JSON: {args.output}/entity_graph.json")

@@ -714,7 +714,7 @@ def extract_entities(
 def print_stats(doc: DocumentEntities):
     """Вывод статистики по сущностям."""
     print(f"\n{'═' * 55}")
-    print(f"  📄 {Path(doc.source_path).name}")
+    print(f"  {Path(doc.source_path).name}")
     print(f"{'═' * 55}")
     print(f"  Движок:         {doc.engine}")
     print(f"  Raw сущностей:  {doc.total_entities}")
@@ -859,5 +859,5 @@ if __name__ == "__main__":
 
     if results:
         total = sum(r.unique_entities for r in results)
-        print(f"\n🎉 Готово! {total} уникальных сущностей в {args.output}/")
+        print(f"\n Готово! {total} уникальных сущностей в {args.output}/")
         print(f"   Следующий шаг: построение графа")

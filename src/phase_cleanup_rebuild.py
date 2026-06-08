@@ -858,7 +858,7 @@ def export_all(G, resolved: list[dict], metrics: dict, output_dir: str):
 def print_results(G, metrics: dict, resolved: list[dict]):
     """Финальная статистика."""
     print(f"\n{'═' * 60}")
-    print(f"  🕸  ОЧИЩЕННЫЙ ГРАФ СУЩНОСТЕЙ")
+    print(f"    ОЧИЩЕННЫЙ ГРАФ СУЩНОСТЕЙ")
     print(f"{'═' * 60}")
     print(f"  Узлов:           {metrics['nodes']}")
     print(f"  Рёбер:           {metrics['edges']}")
@@ -956,7 +956,7 @@ if __name__ == "__main__":
         min_edge_weight=args.min_edge_weight,
     )
 
-    print(f"🎉 Готово!")
+    print(f" Готово!")
     print(f"   Граф: {args.output}/entity_graph_clean.html")
     print(f"   GraphML: {args.output}/entity_graph_clean.graphml")
     print(f"   Открой: open {args.output}/entity_graph_clean.html")

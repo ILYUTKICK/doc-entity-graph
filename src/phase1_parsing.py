@@ -833,7 +833,7 @@ def print_stats(doc: ParsedDocument):
     total_chars = sum(len(b.content) for b in doc.blocks)
 
     print(f"\n{'═' * 50}")
-    print(f"  📄 {Path(doc.source_path).name}")
+    print(f"   {Path(doc.source_path).name}")
     print(f"{'═' * 50}")
     print(f"  Страниц:  {doc.total_pages}")
     print(f"  Блоков:   {len(doc.blocks)}")
