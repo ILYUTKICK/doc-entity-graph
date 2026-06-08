@@ -873,7 +873,7 @@ def print_stats(doc: ChunkedDocument):
     """Вывод статистики по чанкам."""
     s = doc.stats
     print(f"\n{'═' * 55}")
-    print(f"  📄 {Path(doc.source_path).name}")
+    print(f"   {Path(doc.source_path).name}")
     print(f"{'═' * 55}")
     print(f"  Стратегия:      {doc.config['strategy']}")
     print(f"  Max токенов:    {doc.config['max_tokens']}")
@@ -1056,5 +1056,5 @@ if __name__ == "__main__":
 
     if results:
         total = sum(r.total_chunks for r in results)
-        print(f"\n🎉 Готово! {total} чанков в {args.output}/")
+        print(f"\n Готово! {total} чанков в {args.output}/")
         print(f"   Следующий шаг: python phase3_ner.py -i {args.output}/")
