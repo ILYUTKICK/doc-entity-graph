@@ -1067,7 +1067,7 @@ if __name__ == "__main__":
             args.output,
             backend=args.backend,
         )
-        print(f"\n🎉 Готово! Обработано {len(results)} документов")
+        print(f"\n Готово! Обработано {len(results)} документов")
         print(f"   Результаты в: {args.output}/")
 
     elif input_path.is_file():
@@ -1087,7 +1087,7 @@ if __name__ == "__main__":
             validate_parsing(doc)
             print_stats(doc)
             save_for_next_phase(doc, f"{args.output}/{input_path.stem}_parsed.json")
-            print(f"\n🎉 Готово! Результат: {args.output}/{input_path.stem}_parsed.json")
+            print(f"\n Готово! Результат: {args.output}/{input_path.stem}_parsed.json")
 
     else:
         print(f"✗ Путь не найден: {args.input}")
