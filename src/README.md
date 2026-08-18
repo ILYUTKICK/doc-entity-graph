@@ -1,167 +1,234 @@
-# Навигатор по `src`
+# `src/` Guide
 
-`src` — это основной исполняемый код проекта. Каждый файл отвечает за одну
-фазу пайплайна, поэтому проект удобно показывать как последовательную обработку
-документа, а не как набор отдельных скриптов.
+The `src/` directory contains the executable stages of the document-to-graph pipeline.
 
-## Основной маршрут для защиты
+For full architecture, commands, JSON schemas, and troubleshooting, see the documentation in [`../docs/`](../docs/).
 
-Самый понятный маршрут:
-
-1. `phase1_parsing.py`
-2. `phase2_chunking.py`
-3. `phase3_ner.py`
-4. `phase_cleanup_rebuild.py`
-5. `phase5_linking.py`
-
-Что происходит с документом:
+## Pipeline Overview
 
 ```text
-исходные документы
-  -> структура документа после парсинга
-  -> смысловые чанки
-  -> извлечённые сущности
-  -> очищенный граф сущностей
-  -> linking-граф документа
+Source Documents
+      |
+      v
+Phase 1 — Structured Parsing
+      |
+      v
+Phase 2 — Semantic Chunking
+      |
+      v
+Phase 3 — Named Entity Recognition
+      |
+      +-----------------------------+
+      |                             |
+      v                             v
+Phase 4 — Entity Graph      Phase 5 — Document Linking Graph
 ```
 
-## Файлы
+## Main Modules
 
 ### `phase1_parsing.py`
 
-Парсит исходные документы через MinerU.
+Parses source documents with MinerU.
 
-Вход:
+**Input**
 
-- PDF/DOCX/PPTX-файлы из входной директории.
+- PDF
+- DOCX
+- PPTX
 
-Выход:
+**Output**
 
-- `*_parsed.json` с текстовыми блоками и структурными элементами.
-- Структурные элементы: заголовки, рисунки, подписи, таблицы, формулы.
+```text
+data/parsed/*_parsed.json
+```
 
-Зачем нужно:
+The parsed representation keeps both text blocks and structured document elements such as titles, figures, captions, tables, formulas, and lists.
 
-- Эта фаза переводит документ в машинно-читаемый формат.
-- Структура документа сохраняется и затем используется для связи сущностей с
-  рисунками, таблицами, подписями и секциями.
+---
 
 ### `phase2_chunking.py`
 
-Разбивает распарсенный документ на смысловые чанки.
+Splits parsed documents into semantic chunks while preserving document provenance.
 
-Вход:
+**Input**
 
-- `*_parsed.json` из Фазы 1.
+```text
+data/parsed/*_parsed.json
+```
 
-Выход:
+**Output**
 
-- `*_chunked.json` с текстом чанков, контекстом секций и ссылками на исходные
-  элементы документа.
+```text
+data/chunked/*_chunked.json
+```
 
-Зачем нужно:
+Chunks keep section context, page ranges, source blocks, and references to related structured elements.
 
-- NER лучше работает с небольшими фрагментами текста, чем с целым документом.
-- Каждый чанк хранит provenance: откуда он взят и с какими элементами документа
-  связан.
+---
 
 ### `phase3_ner.py`
 
-Извлекает именованные сущности из чанков.
+Extracts named entities from document chunks.
 
-Вход:
+**Input**
 
-- `*_chunked.json` из Фазы 2.
+```text
+data/chunked/*_chunked.json
+```
 
-Выход:
+**Output**
 
-- `*_entities.json` с сущностями, нормализованными названиями, типами,
-  confidence и ссылками на исходный контекст.
+```text
+data/entities/*_entities.json
+```
 
-Движки:
+Supported extraction paths:
 
-- SpaCy: быстрый базовый NER.
-- GLiNER: zero-shot NER для доменных типов.
-- LLM: опциональный API-режим.
+- SpaCy — baseline local NER
+- GLiNER — optional zero-shot/domain enrichment
+- LLM — optional API-based extraction
 
-Зачем нужно:
+Entity records retain the provenance inherited from their source chunks.
 
-- Эта фаза находит объекты, которые потом становятся узлами графа.
-- Каждая сущность сохраняет связь с чанком и документом, где она была найдена.
-
-### `phase_cleanup_rebuild.py`
-
-Очищает сущности и строит итоговый граф сущностей.
-
-Вход:
-
-- Файлы сущностей из Фазы 3.
-- Файлы чанков из Фазы 2.
-
-Выход:
-
-- `entity_graph_clean.graphml`
-- `entity_graph_clean.json`
-- `entity_graph_clean.html`
-- `resolved_entities_clean.json`
-- `graph_metrics_clean.json`
-
-Зачем нужно:
-
-- Raw NER может давать шум: OCR-артефакты, куски формул, слишком короткие
-  сущности.
-- Эта фаза фильтрует шум, объединяет дубли и строит граф, который удобнее
-  показывать на демо.
-
-### `phase5_linking.py`
-
-Строит linking-граф документа.
-
-Вход:
-
-- Структурные элементы из Фазы 1.
-- Чанки из Фазы 2.
-- Сущности из Фазы 3.
-
-Выход:
-
-- `document_links.graphml`
-- `document_links.json`
-- `document_links.html`
-- `linking_metrics.json`
-
-Зачем нужно:
-
-- Этот граф показывает, где именно сущности появляются в документе.
-- Он связывает сущности с чанками, рисунками, таблицами и подписями.
+---
 
 ### `phase4_graph.py`
 
-Строит базовый граф совместной встречаемости сущностей.
+Builds the baseline entity co-occurrence graph.
 
-Вход:
+**Input**
 
-- Файлы сущностей из Фазы 3.
+```text
+data/entities/
+```
 
-Выход:
+**Purpose**
 
-- Базовые GraphML, JSON и HTML-артефакты графа.
+This module provides a simple and reproducible baseline in which entities are connected when they occur in the same chunk.
 
-Почему файл оставлен:
+For the cleaned portfolio-facing entity graph, use `phase_cleanup_rebuild.py`.
 
-- Это простая версия графа, которую удобно использовать как baseline.
-- Для защиты лучше показывать итоговый граф из `phase_cleanup_rebuild.py`,
-  потому что там есть очистка и более аккуратная пересборка.
+---
 
-## Короткое объяснение для преподавателя
+### `phase_cleanup_rebuild.py`
 
-Проект — это пайплайн анализа документов. Он берёт исходный учебный или
-аналитический документ, извлекает из него текст и структуру, делит текст на
-смысловые фрагменты, находит сущности, очищает и объединяет их, а затем строит
-графовые представления.
+Cleans extracted entities, resolves duplicates, and rebuilds the entity graph.
 
-Ключевая идея проекта — provenance, то есть сохранение происхождения данных.
-Каждая найденная сущность связана с чанком, секцией и структурными элементами
-документа, откуда она была извлечена. Поэтому граф можно объяснять: не только
-показать, что сущность существует, но и показать, где именно она встретилась в
-исходном документе.
+**Input**
+
+```text
+data/entities/
+data/chunked/
+```
+
+**Output**
+
+```text
+outputs/entity_graph_clean.html
+outputs/entity_graph_clean.graphml
+outputs/entity_graph_clean.json
+outputs/resolved_entities_clean.json
+outputs/graph_metrics_clean.json
+```
+
+Main responsibilities:
+
+- filter noisy NER output;
+- normalize and resolve duplicate entities;
+- optionally enrich entities with GLiNER;
+- rebuild the weighted co-occurrence graph;
+- calculate graph metrics and communities;
+- export interactive and machine-readable artifacts.
+
+---
+
+### `phase5_linking.py`
+
+Builds the provenance-aware document linking graph.
+
+**Input**
+
+```text
+data/parsed/
+data/chunked/
+data/entities/
+```
+
+**Output**
+
+```text
+outputs/document_links.html
+outputs/document_links.graphml
+outputs/document_links.json
+outputs/linking_metrics.json
+```
+
+This graph connects entities to the document structure they came from, including chunks, figures, tables, captions, titles, and the source document.
+
+Typical relations include:
+
+```text
+CONTAINS_CHUNK
+CONTAINS_ELEMENT
+MENTIONED_IN
+EXTRACTED_FROM
+RELATED_TO
+DISCUSSED_NEAR
+HAS_CAPTION
+CAPTION_OF
+```
+
+## Which Graph Should I Use?
+
+### Entity Graph
+
+Use the entity graph when you want to inspect:
+
+- entity co-occurrence;
+- graph communities;
+- central entities;
+- weighted entity relationships.
+
+Generated by:
+
+```text
+phase_cleanup_rebuild.py
+```
+
+### Document Linking Graph
+
+Use the linking graph when you want to inspect:
+
+- entity provenance;
+- relationships between entities and chunks;
+- links to figures, tables, and captions;
+- preserved document structure after chunking.
+
+Generated by:
+
+```text
+phase5_linking.py
+```
+
+## Full Pipeline
+
+The recommended way to run all stages is the repository wrapper:
+
+```bash
+bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+For a reproducible demo:
+
+```bash
+python scripts/create_demo_input.py
+bash scripts/run_pipeline.sh data/raw_demo pipeline 512 1 12
+```
+
+## Documentation
+
+- [`../docs/architecture.md`](../docs/architecture.md) — architecture, provenance model, node and edge types
+- [`../docs/pipeline.md`](../docs/pipeline.md) — phase-by-phase commands, inputs, outputs, and JSON fields
+- [`../docs/demo.md`](../docs/demo.md) — reproducible end-to-end demo
+- [`../docs/results.md`](../docs/results.md) — generated artifacts, metrics, GraphML, and example outputs
+- [`../docs/troubleshooting.md`](../docs/troubleshooting.md) — common setup and runtime issues
