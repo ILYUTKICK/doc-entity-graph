@@ -1,16 +1,47 @@
-# Архитектура
+# Architecture
 
-Проект устроен как воспроизводимый пайплайн `документ -> граф`.
+`doc-entity-graph` is a reproducible document-intelligence pipeline that turns unstructured documents into graph representations while preserving provenance across every processing stage.
 
-## Phase 1: Парсинг
+The system is split into five processing phases so that each transformation can be inspected, tested, and reproduced independently.
 
-Точка входа: `src/phase1_parsing.py`
+## High-Level Flow
 
-Вход: исходные документы из `data/raw/` или другой входной папки.
+```text
+PDF / DOCX / PPTX
+        |
+        v
+Phase 1 — Structured Parsing
+        |
+        v
+Phase 2 — Semantic Chunking
+        |
+        v
+Phase 3 — Named Entity Recognition
+        |
+        +-----------------------------+
+        |                             |
+        v                             v
+Phase 4 — Entity Graph         Phase 5 — Document Linking Graph
+```
 
-Выход: `data/parsed/*_parsed.json`.
+The core architectural idea is **provenance preservation**: chunks and entities retain enough information to trace them back to the original document structure, including pages, sections, figures, tables, captions, and source blocks.
 
-Фаза вызывает MinerU и нормализует результат в устойчивую JSON-схему:
+---
+
+## Phase 1 — Structured Parsing
+
+**Entry point:** `src/phase1_parsing.py`
+
+**Input:** PDF, DOCX, or PPTX files.
+
+**Output:** `data/parsed/*_parsed.json`
+
+MinerU is used as the document parsing layer. The parser normalizes each input document into two complementary representations:
+
+- `blocks` — the text-oriented layer used by the chunking phase;
+- `elements` — the structural layer containing titles, text elements, figures, captions, tables, formulas, lists, and layout relationships.
+
+Important document-level fields include:
 
 ```text
 source
@@ -24,93 +55,129 @@ elements[]
 full_markdown
 ```
 
-`blocks` — текстовый слой документа. Каждый блок хранит текст, номер страницы, координаты `bbox` и индекс блока.
+The structured layer is important because text-only extraction would lose relationships between prose and nearby figures, tables, captions, and section boundaries.
 
-`elements` — структурный слой документа. В нём хранятся заголовки, текстовые элементы, рисунки, подписи, таблицы, формулы и связи подписей с рисунками/таблицами.
+---
 
-Этот provenance важен, потому что следующие фазы могут восстановить, из какой части документа появился чанк, сущность или связь в графе.
+## Phase 2 — Semantic Chunking
 
-## Phase 2: Чанкинг
+**Entry point:** `src/phase2_chunking.py`
 
-Точка входа: `src/phase2_chunking.py`
+**Input:** `data/parsed/*_parsed.json`
 
-Вход: `data/parsed/*_parsed.json`.
+**Output:** `data/chunked/*_chunked.json`
 
-Выход: `data/chunked/*_chunked.json`.
+Parsed text blocks are grouped by document section and split into semantic chunks with a configurable maximum token size.
 
-Фаза группирует блоки по разделам документа и режет длинные секции на чанки. Чанки сохраняют:
+Each chunk keeps both textual context and provenance information, including:
 
-- заголовок секции;
-- диапазон страниц;
-- индексы исходных блоков;
-- признак overlap;
-- ссылки на исходные структурные элементы.
+- section title;
+- page range;
+- source block indices;
+- overlap information;
+- `source_blocks`;
+- `source_element_ids` / `source_elements`;
+- `related_element_ids` / `related_elements`.
 
-Каждый чанк также хранит:
+This phase creates the bridge between ordinary text chunks and the original document structure.
 
-- `source_blocks`
-- `source_element_ids` / `source_elements`
-- `related_element_ids` / `related_elements`
+---
 
-Это мост между обычными текстовыми чанками и структурой документа: рисунками, таблицами и подписями.
+## Phase 3 — Named Entity Recognition
 
-## Phase 3: NER
+**Entry point:** `src/phase3_ner.py`
 
-Точка входа: `src/phase3_ner.py`
+**Input:** `data/chunked/*_chunked.json`
 
-Вход: `data/chunked/*_chunked.json`.
+**Output:** `data/entities/*_entities.json`
 
-Выход: `data/entities/*_entities.json`.
+The project supports multiple NER paths:
 
-Доступные NER-движки:
+- **SpaCy** — fast baseline NER;
+- **GLiNER** — optional zero-shot/domain-oriented enrichment;
+- **LLM** — optional API-based extraction path.
 
-- `spacy` — быстрый baseline для стандартных типов сущностей;
-- `gliner` — zero-shot извлечение доменных сущностей;
-- `llm` — опциональный API-based путь для извлечения сущностей.
+Entities inherit chunk provenance so they can be traced back to the document context where they were extracted.
 
-Сущности наследуют provenance чанка:
+Typical entity fields include:
 
-- диапазон страниц;
-- секцию;
-- исходные блоки;
-- `source_element_ids`;
-- `related_element_ids`.
+```text
+text
+normalized
+entity_type
+confidence
+chunk_id
+section_title
+page_start
+page_end
+source_element_ids
+related_element_ids
+context
+```
 
-Так можно отследить сущность обратно к тексту, таблице, графику или подписи.
+---
 
-## Phase 4: Baseline-граф
+## Phase 4 — Entity Graph
 
-Точка входа: `src/phase4_graph.py`
+Two graph-building stages exist for the entity-only representation.
 
-Вход: `data/entities/*_entities.json`.
+### Baseline graph
 
-Выход: файлы графа в `data/graph/`.
+**Entry point:** `src/phase4_graph.py`
 
-Эта фаза строит граф совместной встречаемости: две сущности соединяются ребром, если они встретились в одном чанке.
+Entities are connected when they co-occur in the same chunk.
 
-Это baseline, а не полноценное извлечение смысловых отношений.
+This is intentionally a **co-occurrence baseline**, not semantic relation extraction.
 
-## Clean Graph Rebuild
+### Clean graph rebuild
 
-Точка входа: `src/phase_cleanup_rebuild.py`
+**Entry point:** `src/phase_cleanup_rebuild.py`
 
-Вход: `data/entities/` и `data/chunked/`.
+**Input:**
 
-Выход: финальные артефакты в `outputs/`.
+```text
+data/entities/
+data/chunked/
+```
 
-Фаза:
+**Output:**
 
-- фильтрует шумные SpaCy-сущности;
-- опционально добавляет GLiNER-сущности;
-- объединяет дубли;
-- пересобирает чистый entity-граф;
-- экспортирует HTML, GraphML, JSON и метрики.
+```text
+outputs/entity_graph_clean.html
+outputs/entity_graph_clean.graphml
+outputs/entity_graph_clean.json
+outputs/resolved_entities_clean.json
+outputs/graph_metrics_clean.json
+```
 
-## Phase 5: Linking-граф Документа
+The clean rebuild:
 
-Точка входа: `src/phase5_linking.py`
+- filters noisy NER outputs;
+- optionally enriches entities with GLiNER;
+- resolves duplicate entities;
+- rebuilds the co-occurrence graph;
+- calculates graph metrics and communities;
+- exports JSON, GraphML, and interactive HTML.
 
-Вход:
+The exported entity graph JSON has the high-level structure:
+
+```json
+{
+  "nodes": [],
+  "edges": [],
+  "metrics": {}
+}
+```
+
+Entity nodes include attributes such as label, entity type, frequency, community, degree, source documents, sections, and provenance references. Edges contain `source`, `target`, and `weight`.
+
+---
+
+## Phase 5 — Document Linking Graph
+
+**Entry point:** `src/phase5_linking.py`
+
+**Input:**
 
 ```text
 data/entities/
@@ -118,7 +185,7 @@ data/chunked/
 data/parsed/
 ```
 
-Выход:
+**Output:**
 
 ```text
 outputs/document_links.html
@@ -127,13 +194,112 @@ outputs/document_links.json
 outputs/linking_metrics.json
 ```
 
-Фаза строит гетерогенный направленный граф с явными связями:
+This phase builds a heterogeneous directed graph that preserves the structural context of the original document.
+
+### Node types
+
+The linking graph may contain the following node types:
+
+- `document`
+- `entity`
+- `chunk`
+- `figure`
+- `caption`
+- `table`
+- `formula`
+- `title`
+- `text`
+- `list`
+- `unknown`
+
+### Edge types
+
+| Relation | Meaning |
+|---|---|
+| `CONTAINS_CHUNK` | Document contains a chunk |
+| `CONTAINS_ELEMENT` | Document contains a structured element |
+| `MENTIONED_IN` | Entity appears in a chunk |
+| `EXTRACTED_FROM` | Chunk/entity comes directly from a structured element |
+| `RELATED_TO` | Chunk is associated with a nearby or section-related structured element |
+| `DISCUSSED_NEAR` | Entity is associated with a figure, table, or caption based on preserved provenance |
+| `HAS_CAPTION` | Figure/table points to its caption |
+| `CAPTION_OF` | Caption points back to its linked figure/table |
+
+The JSON export follows:
+
+```json
+{
+  "nodes": [],
+  "edges": [],
+  "metrics": {}
+}
+```
+
+Each node keeps its graph attributes and `node_type`. Each edge keeps its `relation`, source, target, graph key, and visualization metadata.
+
+---
+
+## Provenance Model
+
+Provenance flows through the pipeline rather than being reconstructed at the end.
+
+```text
+Document
+  |
+  +-- Block / Structured Element
+          |
+          v
+        Chunk
+          |
+          v
+        Entity
+```
+
+At the parsing stage, every structural element receives its document context. During chunking, source and related element references are copied into the chunk. During NER, this context is propagated to each entity.
+
+As a result, Phase 5 can build relationships such as:
 
 ```text
 Entity -> MENTIONED_IN -> Chunk
+Chunk  -> EXTRACTED_FROM -> Figure/Table/Text
 Entity -> DISCUSSED_NEAR -> Figure/Table/Caption
-Chunk  -> RELATED_TO -> Figure/Table/Caption
-Figure -> HAS_CAPTION -> Caption
 ```
 
-Linking-граф отделён от baseline-графа совместной встречаемости. Он показывает, как структурный парсинг MinerU помогает восстановить контекст вокруг рисунков, таблиц и подписей даже после разбиения текста на чанки.
+without relying only on textual similarity.
+
+---
+
+## Architectural Rationale
+
+### Why preserve document structure?
+
+Chunking is useful for downstream NLP and retrieval, but isolated chunks can lose the relationships between text and visual or tabular content. Keeping provenance makes those relationships recoverable.
+
+### Why keep two graph representations?
+
+- **Entity graph:** which entities frequently occur in the same textual context?
+- **Document linking graph:** where did an entity come from, and which document elements surround it?
+
+Keeping them separate avoids mixing a co-occurrence baseline with document-structure relationships.
+
+### Why use co-occurrence as the entity-graph baseline?
+
+Co-occurrence is deterministic, reproducible, easy to inspect, and does not pretend to be semantic relation extraction.
+
+### Why use top-N pruning for `DISCUSSED_NEAR`?
+
+Large documents can produce very dense linking graphs. `--max-entity-links-per-element` keeps the highest-ranked candidates while preserving readability.
+
+### Why make GLiNER optional?
+
+The core pipeline should remain usable when external model downloads are unavailable. SpaCy provides the baseline path, while GLiNER can enrich results when available.
+
+---
+
+## Design Principles
+
+1. **Traceability** — graph nodes should be traceable to document context.
+2. **Reproducibility** — each phase can run independently.
+3. **Graceful degradation** — optional enrichment should not block the baseline pipeline.
+4. **Inspectable outputs** — JSON, GraphML, metrics, and HTML are exported.
+5. **Separation of concerns** — parsing, chunking, extraction, and graph building stay modular.
