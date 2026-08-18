@@ -23,6 +23,15 @@ Entity Resolution
 ↓                      ↓
 Entity Graph      Document Linking Graph
 ```
+## Example Output
+
+### Document Linking Graph
+
+![Document linking graph](docs/images/document-linking-graph.png)
+
+### Entity Graph
+
+![Entity graph](docs/images/entity-graph.png)
 
 ## Key Features
 
