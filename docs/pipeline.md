@@ -1,106 +1,299 @@
-# Пайплайн
+# Pipeline
 
-Этот файл описывает запуск проекта и правила воспроизводимости. Короткая инструкция для нового пользователя лежит в `README.md`.
+This document describes the complete processing pipeline, including commands, inputs, outputs, and the main JSON fields passed between phases.
 
-## Установка
+For the shortest end-to-end example, see [`demo.md`](demo.md).
 
-Обычная установка:
+---
+
+## Environment Setup
 
 ```bash
 bash scripts/setup_env.sh
 ```
 
-Скрипт создаёт структуру папок и устанавливает зависимости из `requirements.txt`.
-
-Если conda установлена, будет создано окружение `doc-graph`. Если conda нет, будет создано локальное `.venv`.
-
-Активировать conda-окружение:
+If Conda is available:
 
 ```bash
 conda activate doc-graph
 export PYTHON_BIN="$(which python)"
 ```
 
-Активировать `.venv`:
+Without Conda:
 
 ```bash
 source .venv/bin/activate
 export PYTHON_BIN="$(which python)"
 ```
 
-Установка без скачивания SpaCy-моделей:
-
-```bash
-SKIP_SPACY_MODELS=1 bash scripts/setup_env.sh
-```
-
-Лёгкая установка только с маленькой английской моделью:
+Optional setup modes:
 
 ```bash
 SPACY_MODELS=en_core_web_sm bash scripts/setup_env.sh
+SKIP_SPACY_MODELS=1 bash scripts/setup_env.sh
 ```
 
-## Полный Запуск
+Python 3.11 is the expected runtime.
 
-Для воспроизводимого демо сначала создай входной DOCX:
+---
+
+# Phase 1 — Structured Parsing
+
+**Entry point:** `src/phase1_parsing.py`
+
+### Command
 
 ```bash
-python scripts/create_teacher_demo_input.py
+$PYTHON_BIN src/phase1_parsing.py \
+  -i data/raw/ \
+  -o data/parsed/ \
+  -b pipeline
 ```
 
-Запусти полный пайплайн:
+### Input
 
-```bash
-bash scripts/run_pipeline.sh data/raw_teacher_demo pipeline 512 1 12
+```text
+.pdf
+.docx
+.pptx
 ```
 
-Для своих документов положи файлы в `data/raw/` и запусти:
+### Output
 
-```bash
-bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```text
+data/parsed/*_parsed.json
 ```
 
-Если HuggingFace или загрузка моделей MinerU нестабильны, можно попробовать ModelScope:
+### Key JSON fields
 
-```bash
-MINERU_MODEL_SOURCE=modelscope bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```text
+source
+source_hash
+total_pages
+backend
+parse_time_sec
+metadata
+blocks
+elements
+full_markdown
 ```
 
-Phase 1 вызывает MinerU через активный Python-интерпретатор. Перед запуском полезно проверить окружение:
+`blocks` is the text-oriented representation used by Phase 2.
 
-```bash
-which python
-python --version
+`elements` is the structural representation. Element types may include:
+
+```text
+title
+text
+figure
+caption
+table
+formula
+list
 ```
 
-Ожидается Python 3.11 из активного окружения.
+---
 
-## Что Сохраняет Каждая Фаза
+# Phase 2 — Semantic Chunking
 
-Phase 1 сохраняет два слоя в каждом `*_parsed.json`:
+**Entry point:** `src/phase2_chunking.py`
 
-- `blocks` — текстовый слой для Phase 2;
-- `elements` — структурный слой MinerU: `figure`, `caption`, `table`, `title`, ссылки на изображения, HTML таблиц и связи подписей.
-
-Phase 2 сохраняет provenance в каждом `*_chunked.json`:
-
-- `source_blocks` — краткое описание блоков, из которых собран чанк;
-- `source_elements` / `source_element_ids` — элементы Phase 1, которые напрямую дали текст;
-- `related_elements` / `related_element_ids` — близкие или секционно связанные `figure`, `caption`, `table`, `formula`.
-
-Phase 3 переносит этот контекст на сущности:
-
-- `page_start` / `page_end`;
-- `section_title`;
-- `section_hierarchy`;
-- `block_indices`;
-- `source_element_ids`;
-- `related_element_ids`.
-
-Phase 5 строит linking-граф после NER:
+### Command
 
 ```bash
-python src/phase5_linking.py \
+$PYTHON_BIN src/phase2_chunking.py \
+  -i data/parsed/ \
+  -o data/chunked/ \
+  --max-tokens 512
+```
+
+### Input
+
+```text
+data/parsed/*_parsed.json
+```
+
+### Output
+
+```text
+data/chunked/*_chunked.json
+```
+
+### Key chunk fields
+
+```text
+chunk_id
+text
+section_title
+section_hierarchy
+page_start
+page_end
+block_indices
+source_blocks
+source_element_ids
+source_elements
+related_element_ids
+related_elements
+```
+
+`source_elements` directly contributed text to the chunk. `related_elements` provide nearby or section-level structural context.
+
+---
+
+# Phase 3 — Named Entity Recognition
+
+**Entry point:** `src/phase3_ner.py`
+
+### Command
+
+```bash
+$PYTHON_BIN src/phase3_ner.py \
+  -i data/chunked/ \
+  -o data/entities/ \
+  --engine spacy
+```
+
+### Input
+
+```text
+data/chunked/*_chunked.json
+```
+
+### Output
+
+```text
+data/entities/*_entities.json
+```
+
+### NER engines
+
+```text
+spacy
+gliner
+llm
+```
+
+### Key entity fields
+
+```text
+text
+normalized
+entity_type
+confidence
+chunk_id
+section_title
+section_hierarchy
+page_start
+page_end
+block_indices
+source_element_ids
+related_element_ids
+context
+```
+
+Entities inherit the provenance of the chunk from which they were extracted.
+
+---
+
+# Phase 4 — Clean Entity Graph
+
+The repository also contains `src/phase4_graph.py` as a simple co-occurrence baseline. The portfolio-facing entity graph is produced by `src/phase_cleanup_rebuild.py`.
+
+### Command
+
+```bash
+$PYTHON_BIN src/phase_cleanup_rebuild.py \
+  -e data/entities/ \
+  -c data/chunked/ \
+  -o outputs/ \
+  --min-edge-weight 1
+```
+
+### Input
+
+```text
+data/entities/
+data/chunked/
+```
+
+### Output
+
+```text
+outputs/entity_graph_clean.html
+outputs/entity_graph_clean.graphml
+outputs/entity_graph_clean.json
+outputs/resolved_entities_clean.json
+outputs/graph_metrics_clean.json
+```
+
+### Entity graph JSON
+
+```json
+{
+  "nodes": [],
+  "edges": [],
+  "metrics": {}
+}
+```
+
+Important node fields:
+
+```text
+id
+label
+type
+frequency
+community
+degree
+source_docs
+sections
+related_refs
+related_figures
+related_tables
+source_element_ids
+related_element_ids
+source_element_count
+related_element_count
+```
+
+Edge fields:
+
+```text
+source
+target
+weight
+```
+
+The graph is a weighted entity co-occurrence graph, not semantic relation extraction.
+
+### Metrics
+
+`graph_metrics_clean.json` may contain:
+
+```text
+nodes
+edges
+density
+avg_degree
+max_degree_node
+max_degree
+top_pagerank
+connected_components
+largest_component
+communities
+community_sizes
+```
+
+---
+
+# Phase 5 — Document Linking Graph
+
+**Entry point:** `src/phase5_linking.py`
+
+### Command
+
+```bash
+$PYTHON_BIN src/phase5_linking.py \
   -e data/entities/ \
   -c data/chunked/ \
   -p data/parsed/ \
@@ -108,34 +301,124 @@ python src/phase5_linking.py \
   --max-entity-links-per-element 12
 ```
 
-Он экспортирует:
+### Input
 
-- `outputs/document_links.html`
-- `outputs/document_links.graphml`
-- `outputs/document_links.json`
-- `outputs/linking_metrics.json`
+```text
+data/entities/
+data/chunked/
+data/parsed/
+```
 
-Для больших документов Phase 5 ограничивает связи `DISCUSSED_NEAR`, оставляя top-N сущностей на каждый структурный элемент. По умолчанию `12`. Значение `0` отключает ограничение.
+### Output
 
-HTML-визуализация открывается в отфильтрованном режиме `Core`. Для локального просмотра окружения можно использовать режимы `Figures`, `Tables`, фильтры по секции/странице и селектор конкретного рисунка или таблицы.
+```text
+outputs/document_links.html
+outputs/document_links.graphml
+outputs/document_links.json
+outputs/linking_metrics.json
+```
 
-## Параметры Полного Скрипта
+### Linking graph JSON
+
+```json
+{
+  "nodes": [],
+  "edges": [],
+  "metrics": {}
+}
+```
+
+Nodes include:
+
+```text
+id
+node_type
+color
+```
+
+Depending on node type, additional fields may include:
+
+```text
+label
+doc_name
+section_title
+page_start
+page_end
+text_preview
+entity_type
+confidence
+frequency
+context
+ref_label
+caption
+```
+
+Edges include:
+
+```text
+source
+target
+key
+relation
+color
+```
+
+Supported relation labels:
+
+```text
+CONTAINS_CHUNK
+CONTAINS_ELEMENT
+MENTIONED_IN
+EXTRACTED_FROM
+RELATED_TO
+DISCUSSED_NEAR
+HAS_CAPTION
+CAPTION_OF
+```
+
+### Linking metrics
+
+`linking_metrics.json` may include:
+
+```text
+documents
+entities
+chunks
+figures
+captions
+tables
+formulas
+nodes
+edges
+caption_links
+chunk_related_links
+entity_figure_links
+entity_table_links
+discussed_near_candidates
+discussed_near_kept
+discussed_near_pruned
+max_entity_links_per_element
+```
+
+---
+
+# Full Pipeline
 
 ```bash
 bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
 ```
 
-Аргументы:
+Arguments:
 
 ```text
-1. input_dir       папка с исходными документами
-2. backend         backend MinerU: pipeline, vlm, hybrid, auto
-3. max_tokens      максимальный размер чанка
-4. min_edge_weight минимальный вес ребра в entity-графе
-5. max_entity_links_per_element top-N связей Entity -> Figure/Table/Caption
+1. input_dir
+2. MinerU backend: pipeline, vlm, hybrid, auto
+3. max_tokens
+4. min_edge_weight
+5. max_entity_links_per_element
 ```
 
-По умолчанию `run_pipeline.sh` использует `CLEAN_RUN=1` и удаляет старые артефакты из:
+The wrapper normally clears old generated artifacts from:
 
 ```text
 data/parsed/
@@ -145,34 +428,77 @@ data/graph/
 outputs/
 ```
 
-Исходные документы в `data/raw/` не удаляются.
+Raw source documents are preserved.
 
-Чтобы сохранить старые артефакты:
+Keep old artifacts with:
 
 ```bash
 CLEAN_RUN=0 bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
 ```
 
-## Пошаговый Запуск
+---
+
+## Environment Variables
 
 ```bash
-python src/phase1_parsing.py -i data/raw/ -o data/parsed/ -b pipeline
-python src/phase2_chunking.py -i data/parsed/ -o data/chunked/ --max-tokens 512
-python src/phase3_ner.py -i data/chunked/ -o data/entities/ --engine spacy
-python src/phase_cleanup_rebuild.py -e data/entities/ -c data/chunked/ -o outputs/ --min-edge-weight 1
-python src/phase5_linking.py -e data/entities/ -c data/chunked/ -p data/parsed/ -o outputs/ --max-entity-links-per-element 12
+PYTHON_BIN="$(which python)"
+NER_ENGINE=spacy
+CLEAN_RUN=1
+MAX_ENTITY_LINKS_PER_ELEMENT=12
+MINERU_MODEL_SOURCE=modelscope
 ```
 
-## Чеклист Воспроизводимости
+Examples:
 
-- Зафиксировать входную папку документов.
-- Зафиксировать backend MinerU.
-- Зафиксировать `max_tokens`.
-- Зафиксировать NER engine.
-- Зафиксировать `min_edge_weight`.
-- Зафиксировать `max_entity_links_per_element`, потому что он меняет плотность связей `DISCUSSED_NEAR`.
-- Хранить исходные документы и сгенерированные артефакты вне git.
-- Сохранять метрики из `outputs/graph_metrics_clean.json`.
-- Сохранять метрики из `outputs/linking_metrics.json`.
-- Перед отчётом запускать `python -B -m unittest discover -s tests`.
-- После полного запуска проверять артефакты через `bash scripts/check_outputs.sh`.
+```bash
+NER_ENGINE=spacy bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+```bash
+MINERU_MODEL_SOURCE=modelscope bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+Explicit MinerU command:
+
+```bash
+MINERU_BIN="$(which python) -m mineru.cli.client" \
+bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+---
+
+## Validation
+
+```bash
+python -B -m unittest discover -s tests
+bash scripts/check_outputs.sh
+```
+
+Optional syntax validation:
+
+```bash
+python -B -m py_compile \
+  src/phase1_parsing.py \
+  src/phase2_chunking.py \
+  src/phase3_ner.py \
+  src/phase4_graph.py \
+  src/phase_cleanup_rebuild.py \
+  src/phase5_linking.py
+```
+
+---
+
+## Reproducibility Checklist
+
+Record:
+
+- input document set;
+- MinerU backend;
+- chunk `max_tokens`;
+- NER engine;
+- entity graph `min_edge_weight`;
+- `max_entity_links_per_element`;
+- `outputs/graph_metrics_clean.json`;
+- `outputs/linking_metrics.json`.
+
+Model availability and versions may change exact entity counts.
