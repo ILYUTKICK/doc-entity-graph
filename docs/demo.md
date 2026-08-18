@@ -1,541 +1,175 @@
-## 1. Идея проекта
+# Demo
 
-Проект строит граф сущностей из неструктурированного документа. На вход подаётся документ в формате PDF, DOCX или PPTX, а на выходе получаются интерактивные графы, JSON-артефакты и GraphML-файлы для внешних инструментов вроде Gephi.
+This guide shows the shortest reproducible path from a generated input document to both interactive graph visualizations.
 
-Главная идея: обычный текстовый чанкинг часто теряет связь между текстом, графиками, таблицами и подписями. Этот проект сохраняет такую связь через структурный парсинг документа и перенос provenance через все фазы пайплайна.
+The commands below assume the public demo generator is named `scripts/create_demo_input.py`.
 
-Проще говоря:
+---
 
-```text
-Документ
-  -> структурный парсинг
-  -> чанки текста
-  -> сущности
-  -> граф сущностей
-  -> linking-граф: сущности + чанки + рисунки + таблицы + подписи
-```
-
-## 2. Что используется
-
-- MinerU — парсинг документа и извлечение структуры: текст, таблицы, рисунки, подписи.
-- SpaCy — базовое извлечение именованных сущностей.
-- GLiNER — опциональное zero-shot расширение NER для доменных сущностей.
-- NetworkX — построение графов.
-- D3.js — интерактивная HTML-визуализация.
-
-## 3. Как развернуть проект с нуля
-
-Преподавателю достаточно получить репозиторий, поставить окружение, создать демо-документ и запустить пайплайн.
+## 1. Set Up the Environment
 
 ```bash
-git clone https://github.com/ILYUTKICK/doc-entity-graph.git
-cd doc-entity-graph
 bash scripts/setup_env.sh
+```
+
+Activate the environment.
+
+With Conda:
+
+```bash
 conda activate doc-graph
 export PYTHON_BIN="$(which python)"
 ```
 
-Если conda не установлена, `scripts/setup_env.sh` создаст локальное `.venv`. Тогда вместо `conda activate doc-graph` нужно выполнить:
+With the local virtual environment:
 
 ```bash
 source .venv/bin/activate
 export PYTHON_BIN="$(which python)"
 ```
 
-Если не хочется скачивать большие SpaCy-модели во время первичной установки, можно поставить окружение легче:
+Confirm the runtime:
 
 ```bash
-SKIP_SPACY_MODELS=1 bash scripts/setup_env.sh
-conda activate doc-graph
-export PYTHON_BIN="$(which python)"
-python -m spacy download en_core_web_sm
+which python
+python --version
 ```
 
-После установки нужно создать демонстрационный входной документ:
+Python 3.11 is expected.
+
+---
+
+## 2. Generate the Demo Input
 
 ```bash
-python scripts/create_teacher_demo_input.py
+python scripts/create_demo_input.py
 ```
 
-Скрипт создаст отдельную папку `data/raw_teacher_demo/` и положит туда DOCX, который можно прогонять через проект. Сам DOCX не хранится в git, потому что входные документы и сгенерированные файлы игнорируются; вместо этого в репозитории хранится воспроизводимый генератор.
-
-Требования к машине:
-
-- Python 3.11;
-- conda или обычный venv;
-- доступ в интернет при первой установке зависимостей и моделей;
-- разрешение на локальный запуск MinerU, потому что он может поднимать локальный сервис на `127.0.0.1`.
-
-Если HuggingFace недоступен, GLiNER может не загрузиться, но пайплайн продолжит работу на SpaCy.
-
-## 4. Что лежит на входе
-
-Для демо используется папка:
+Expected demo directory:
 
 ```text
-data/raw_teacher_demo/
+data/raw_demo/
 ```
 
-В ней создаются два файла:
+The generated DOCX is intended to contain text and structured elements such as tables, figures, and captions.
 
-```text
-demo_teacher_pipeline.docx
-demo_teacher_pipeline_source.txt
-```
+---
 
-`demo_teacher_pipeline.docx` — входной DOCX для пайплайна. `demo_teacher_pipeline_source.txt` — тот же текст в простом формате, чтобы быстро посмотреть содержание без открытия Word.
-
-Демо-документ специально сделан небольшим и понятным: в нём есть повторяющиеся сущности, две таблицы, два графика и подписи. Это позволяет быстро показать, как проект связывает сущности с чанками, таблицами, рисунками и подписями.
-
-## 5. Быстрый запуск демо
-
-Из корня проекта:
+## 3. Run the Complete Pipeline
 
 ```bash
-cd doc-entity-graph
-conda activate doc-graph
-export PYTHON_BIN="$(which python)"
-python scripts/create_teacher_demo_input.py
+bash scripts/run_pipeline.sh data/raw_demo pipeline 512 1 12
 ```
 
-Полный запуск на демо-папке:
-
-```bash
-bash scripts/run_pipeline.sh data/raw_teacher_demo pipeline 512 1 12
-```
-
-Открыть результат:
-
-```bash
-open outputs/document_links.html
-open outputs/entity_graph_clean.html
-```
-
-Проверить, что артефакты собраны корректно:
-
-```bash
-bash scripts/check_outputs.sh
-```
-
-## 6. Архитектура пайплайна
+Demo configuration:
 
 ```text
-data/raw_teacher_demo/*.docx
-        |
-        v
-Phase 1: MinerU parsing
-        |
-        v
-data/parsed/*_parsed.json
-        |
-        v
-Phase 2: semantic chunking
-        |
-        v
-data/chunked/*_chunked.json
-        |
-        v
-Phase 3: NER
-        |
-        v
-data/entities/*_entities.json
-        |
-        +-----------------------------+
-        |                             |
-        v                             v
-Phase 4: clean entity graph     Phase 5: document linking graph
-        |                             |
-        v                             v
-outputs/entity_graph_clean.*    outputs/document_links.*
+MinerU backend: pipeline
+Chunk max tokens: 512
+Minimum entity-graph edge weight: 1
+Max entity links per structured element: 12
 ```
 
-## 7. Phase 1: Парсинг документа
+SpaCy is the baseline NER path. GLiNER enrichment is optional.
 
-Команда:
+---
 
-```bash
-$PYTHON_BIN src/phase1_parsing.py \
-  -i data/raw_teacher_demo \
-  -o data/parsed/ \
-  -b pipeline
-```
-
-Что делает фаза:
-
-- запускает MinerU;
-- читает DOCX/PDF/PPTX;
-- извлекает полный Markdown;
-- сохраняет текстовые блоки;
-- сохраняет структурные элементы документа: заголовки, текст, рисунки, подписи, таблицы.
-
-Вход:
-
-```text
-data/raw_teacher_demo/demo_teacher_pipeline.docx
-```
-
-Выход:
-
-```text
-data/parsed/demo_teacher_pipeline_parsed.json
-```
-
-Ключевые поля в JSON:
-
-- `blocks` — текстовый слой, который затем идёт в чанкинг.
-- `elements` — структурный слой: `title`, `text`, `figure`, `caption`, `table`.
-- `page_number` — номер страницы.
-- `bbox` — координаты элемента на странице.
-- `metadata` — дополнительные связи, например подпись к рисунку.
-
-Смысл для преподавателя: проект не просто извлекает текст, а сохраняет структуру документа. Это важно, потому что таблица или график могут относиться к тексту рядом, даже если они не попали в один текстовый фрагмент.
-
-На демо-документе MinerU должен увидеть текстовые блоки, таблицы, рисунки и подписи.
-
-## 8. Phase 2: Семантический чанкинг
-
-Команда:
-
-```bash
-$PYTHON_BIN src/phase2_chunking.py \
-  -i data/parsed/ \
-  -o data/chunked/ \
-  --max-tokens 512
-```
-
-Что делает фаза:
-
-- делит текст на смысловые чанки;
-- учитывает секции документа;
-- сохраняет перекрытия между чанками;
-- связывает каждый чанк с исходными блоками и структурными элементами.
-
-Выход:
-
-```text
-data/chunked/demo_teacher_pipeline_chunked.json
-```
-
-Ключевые поля:
-
-- `chunk_id` — идентификатор чанка.
-- `text` — текст чанка.
-- `section_title` — раздел документа.
-- `source_blocks` — какие блоки попали в чанк.
-- `source_element_ids` — какие структурные элементы породили текст.
-- `related_element_ids` — какие рисунки, таблицы или подписи находятся рядом.
-
-Смысл для преподавателя: чанк не является безымянным куском текста. У него сохраняется происхождение, поэтому позже можно объяснить, из какой части документа пришла сущность.
-
-## 9. Phase 3: Извлечение сущностей
-
-Команда:
-
-```bash
-$PYTHON_BIN src/phase3_ner.py \
-  -i data/chunked/ \
-  -o data/entities/ \
-  --engine spacy
-```
-
-Что делает фаза:
-
-- извлекает именованные сущности из каждого чанка;
-- нормализует сущности;
-- фильтрует часть шума;
-- переносит provenance с чанка на сущность.
-
-Выход:
-
-```text
-data/entities/demo_teacher_pipeline_entities.json
-```
-
-Ключевые поля:
-
-- `text` — исходный текст сущности.
-- `normalized` — нормализованная форма.
-- `entity_type` — тип сущности.
-- `chunk_id` — где сущность была найдена.
-- `section_title` — раздел документа.
-- `source_element_ids` — из каких элементов документа пришла сущность.
-- `related_element_ids` — с какими рисунками или таблицами она связана контекстно.
-
-Смысл для преподавателя: сущность сохраняет связь не только с текстом, но и со структурным окружением документа.
-
-## 10. Phase 4: Очистка и граф сущностей
-
-Команда:
-
-```bash
-$PYTHON_BIN src/phase_cleanup_rebuild.py \
-  -e data/entities/ \
-  -c data/chunked/ \
-  -o outputs/ \
-  --min-edge-weight 1
-```
-
-Что делает фаза:
-
-- чистит шумные SpaCy-сущности;
-- опционально добавляет GLiNER-сущности, если модель доступна;
-- объединяет дубли;
-- строит граф совместной встречаемости сущностей.
-
-Выход:
-
-```text
-outputs/entity_graph_clean.html
-outputs/entity_graph_clean.graphml
-outputs/entity_graph_clean.json
-outputs/resolved_entities_clean.json
-outputs/graph_metrics_clean.json
-```
-
-Как строится граф сущностей:
-
-```text
-Если две сущности встречаются в одном чанке,
-между ними проводится ребро.
-```
-
-Важно: это не полноценное извлечение отношений. Это воспроизводимый граф по co-occurrence, то есть по совместной встречаемости.
-
-Пример результата на демо-запуске с окружением `doc-graph`:
-
-```text
-Узлов: 11
-Рёбер: 52
-Плотность: 0.9455
-Средняя степень: 9.45
-Компонент связности: 1
-Кластеров: 2
-```
-
-Числа могут немного отличаться, если запускать без GLiNER или без русской SpaCy-модели.
-
-Смысл для преподавателя: этот граф показывает, какие сущности часто оказываются в одном контексте и как они группируются по тематическим кластерам.
-
-## 11. Phase 5: Linking-граф документа
-
-Команда:
-
-```bash
-$PYTHON_BIN src/phase5_linking.py \
-  -e data/entities/ \
-  -c data/chunked/ \
-  -p data/parsed/ \
-  -o outputs/ \
-  --max-entity-links-per-element 12
-```
-
-Что делает фаза:
-
-- строит отдельный документный граф;
-- добавляет узлы разных типов: документ, чанки, сущности, рисунки, таблицы, подписи;
-- связывает сущности с чанками;
-- связывает чанки со структурными элементами;
-- связывает сущности с рисунками, таблицами и подписями рядом;
-- связывает рисунки с подписями.
-
-Выход:
+## 4. Open the Interactive Outputs
 
 ```text
 outputs/document_links.html
-outputs/document_links.graphml
-outputs/document_links.json
-outputs/linking_metrics.json
+outputs/entity_graph_clean.html
 ```
 
-Главные типы узлов:
-
-- `document` — исходный документ.
-- `chunk` — текстовый чанк.
-- `entity` — найденная сущность.
-- `figure` — рисунок или график.
-- `table` — таблица.
-- `caption` — подпись.
-- `formula` — формула, если она есть в документе.
-
-Главные типы связей:
-
-- `CONTAINS_CHUNK` — документ содержит чанк.
-- `CONTAINS_ELEMENT` — документ содержит структурный элемент.
-- `MENTIONED_IN` — сущность упомянута в чанке.
-- `EXTRACTED_FROM` — сущность или чанк извлечены из структурного элемента.
-- `RELATED_TO` — чанк связан с рисунком, таблицей или подписью.
-- `DISCUSSED_NEAR` — сущность обсуждается рядом со структурным элементом.
-- `HAS_CAPTION` — рисунок имеет подпись.
-- `CAPTION_OF` — подпись относится к рисунку или таблице.
-
-В текущей реализации Phase 5 использует сущности из `data/entities/` после Phase 3. Очищенный граф из Phase 4 сохраняется отдельно в `outputs/entity_graph_clean.*`.
-
-Пример результата на демо-запуске с окружением `doc-graph`:
-
-```text
-Документов: 1
-Чанков: 4
-Сущностей: 6
-Рисунков: 2
-Подписей: 4
-Таблиц: 2
-Узлов linking-графа: 30
-Рёбер linking-графа: 161
-Figure-caption links: 4
-Entity-figure links: 8
-Entity-table links: 8
-DISCUSSED_NEAR kept: 32
-DISCUSSED_NEAR pruned: 0
-```
-
-Числа могут немного отличаться, если изменились модели NER или параметры top-N.
-
-Смысл для преподавателя: linking-граф показывает не совместную встречаемость сущностей, а то, как текстовые сущности связаны с чанками, визуальными и табличными элементами документа.
-
-## 12. Что показать на защите
-
-### 12.1. Сначала показать исходный документ
-
-Показать, что документ содержит:
-
-- текст;
-- эконометрические термины;
-- таблицы;
-- графики;
-- подписи к графикам.
-
-Главный тезис: задача не просто извлечь текст, а сохранить связь между текстом, таблицами и графиками.
-
-### 12.2. Затем показать parsed JSON
-
-Файл:
-
-```text
-data/parsed/demo_teacher_pipeline_parsed.json
-```
-
-Что показать:
-
-- `blocks`;
-- `elements`;
-- элементы типа `figure`;
-- элементы типа `table`;
-- элементы типа `caption`.
-
-Тезис: после MinerU документ превращается в структурированное представление.
-
-### 12.3. Затем показать chunked JSON
-
-Файл:
-
-```text
-data/chunked/demo_teacher_pipeline_chunked.json
-```
-
-Что показать:
-
-- `chunks`;
-- `section_title`;
-- `source_element_ids`;
-- `related_element_ids`.
-
-Тезис: каждый чанк знает, откуда он появился и какие структурные элементы находятся рядом.
-
-### 12.4. Затем показать entities JSON
-
-Файл:
-
-```text
-data/entities/demo_teacher_pipeline_entities.json
-```
-
-Что показать:
-
-- текст сущности;
-- тип сущности;
-- `chunk_id`;
-- `source_element_ids`;
-- `related_element_ids`.
-
-Тезис: найденная сущность не теряет связь с документом.
-
-### 12.5. Затем открыть граф сущностей
-
-Файл:
-
-```bash
-open outputs/entity_graph_clean.html
-```
-
-Что показать:
-
-- кластеры сущностей;
-- центральные сущности;
-- типы сущностей;
-- связи по совместной встречаемости.
-
-Тезис: это быстрый способ увидеть тематическую структуру документа по совместной встречаемости сущностей.
-
-### 12.6. В конце открыть linking-граф
-
-Файл:
+On macOS:
 
 ```bash
 open outputs/document_links.html
+open outputs/entity_graph_clean.html
 ```
 
-Что показать:
-
-- режим `Core`;
-- режим `Figures`;
-- режим `Tables`;
-- фильтры по разделу или странице;
-- конкретный рисунок или таблицу и связанные с ними сущности;
-- связи `Entity -> DISCUSSED_NEAR -> Figure/Table/Caption`.
-
-Тезис: это главная часть проекта. Она показывает, что система связывает текстовые сущности с визуальными и табличными элементами документа.
-
-## 13. Чем проект отличается от обычного RAG-чанкинга
-
-Обычный подход:
-
-```text
-Документ -> текст -> чанки
-```
-
-Проблема: график, таблица или подпись могут оказаться отдельно от текста, который их объясняет.
-
-Подход в этом проекте:
-
-```text
-Документ -> текст + структура -> чанки с provenance -> сущности с provenance -> linking-граф
-```
-
-Преимущество: можно проследить связь от сущности обратно к чанку, элементу документа, таблице, рисунку или подписи.
-
-## 14. Ограничения
-
-- Граф сущностей строится по совместной встречаемости, а не по полноценному relation extraction.
-- Качество NER зависит от доступных моделей и языка документа.
-- Если HuggingFace недоступен, GLiNER может не загрузиться; в таком случае пайплайн продолжает работу на SpaCy.
-- Для больших документов linking-граф может быть очень плотным, поэтому Phase 5 ограничивает число связей `DISCUSSED_NEAR` через параметр `--max-entity-links-per-element`.
-
-## 15. Проверка воспроизводимости
-
-После запуска:
+On Linux:
 
 ```bash
+xdg-open outputs/document_links.html
+xdg-open outputs/entity_graph_clean.html
+```
+
+### Document Linking Graph
+
+`document_links.html` visualizes the provenance-aware heterogeneous graph: documents, entities, chunks, figures, tables, captions, and explicit relations.
+
+Useful controls include:
+
+- `Core`
+- `Figures`
+- `Tables`
+- `Show all`
+- section/page filters
+- element focus
+- search
+- label toggle
+
+### Entity Graph
+
+`entity_graph_clean.html` visualizes the cleaned entity co-occurrence graph with entity types, weighted edges, graph communities, search, and filtering controls.
+
+---
+
+## 5. Validate the Outputs
+
+```bash
+python -B -m unittest discover -s tests
 bash scripts/check_outputs.sh
 ```
 
-Ожидается, что проверка подтвердит:
+A successful run should produce:
 
-- есть `data/parsed/*_parsed.json`;
-- есть `data/chunked/*_chunked.json`;
-- есть `data/entities/*_entities.json`;
-- чанки сохранили provenance;
-- сущности сохранили provenance;
-- есть `outputs/entity_graph_clean.html`;
-- есть `outputs/document_links.html`;
-- linking-граф содержит узлы и рёбра.
+```text
+outputs/
+├── entity_graph_clean.html
+├── entity_graph_clean.graphml
+├── entity_graph_clean.json
+├── graph_metrics_clean.json
+├── resolved_entities_clean.json
+├── document_links.html
+├── document_links.graphml
+├── document_links.json
+└── linking_metrics.json
+```
 
+---
+
+## 6. Inspect Metrics
+
+```bash
+cat outputs/graph_metrics_clean.json
+cat outputs/linking_metrics.json
+```
+
+---
+
+## 7. Run on Your Own Documents
+
+Place supported files in:
+
+```text
+data/raw/
+```
+
+For example:
+
+```text
+data/raw/
+├── report.pdf
+├── lecture.docx
+└── slides.pptx
+```
+
+Then run:
+
+```bash
+bash scripts/run_pipeline.sh data/raw pipeline 512 1 12
+```
+
+If the demo fails, see [`troubleshooting.md`](troubleshooting.md).
